@@ -7,8 +7,8 @@
 ![Codex](https://img.shields.io/badge/Codex-AGENTS.md-000000)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
-从一个提示词列表，批量调用 [Dreamifly](https://dreamifly.com) 的 **生图 / 生视频** API 逐条生成并下载。
-排队、节流、自动重试、断点续跑、开跑前预检、多模型路由——把提示词写进 `prompts.txt`，跑一条命令就行。
+把一批提示词交给 [Dreamifly](https://dreamifly.com)，自动选择模型、校验成本、逐条生成并下载 **图片 / 视频**。
+它既是一个零依赖 CLI，也是给 Cursor、Claude Code、Codex 和自定义 Agent 使用的批量媒体生成 Skill。
 
 | | |
 |---|---|
@@ -16,10 +16,24 @@
 | 📦 本仓库 | https://github.com/shaozheng0503/dreamifly-batch |
 | 🌍 English | [README_EN.md](./README_EN.md) |
 
-> 🤖 本仓库同时是一个 **Cursor / [Claude Code](https://claude.com/claude-code) Skill / Codex Agent 工具**：
-> 装好后，你只要对 AI 说"用这批提示词批量生图 / 用这张图生成视频"，它就会自动调用本工具。
-> 详见 [在 AI 里使用](#在-ai-里使用)。
-> 🐍 **零依赖**：只需 Python 3，全部标准库，无需 `pip install`。
+> 对 AI 说"用这批提示词批量生图"或"用这张图生成视频"，Agent 会写队列、校验、估算、预演、确认高成本任务、运行并汇报结果。详见 [在 AI 里使用](#在-ai-里使用)。
+
+## 解决什么问题
+
+你给它：
+
+- 一行一个 prompt 的 `prompts.txt`
+- 或结构化的 `jobs.jsonl` / `.json` / `.yaml`
+- 可选参考图、宽高比、数量、模型、视频秒数、分辨率
+
+它会产出：
+
+- 下载好的图片 / 视频文件，保存在 `images/`
+- 同名 `.json` 边车，记录模型、seed、参数和来源
+- `results.jsonl` 结构化结果，方便 Agent 汇报和自动化
+- `failed.jsonl` 失败任务，可一条命令重新入队
+
+它重点解决三件事：**批量排队、成本风险控制、Agent 可稳定复用**。
 
 ## ✨ 特性
 
@@ -35,6 +49,23 @@
 - ✅ **断点续跑**：成功移入 `done.txt`，失败留在 `prompts.txt` 下次自动重试
 - 🤖 **AI 原生**：自带 `SKILL.md` / `AGENTS.md`，Claude Code、Codex、自定义 Agent 都能直接调用
 
+## 适合 / 不适合
+
+适合：
+
+- 一次跑几十条图片 prompt，想自动下载、记录参数、失败续跑
+- 给每条 prompt 指定不同模型、比例、数量、seed 或参考图
+- 让 Agent 代你完成“写队列 → 校验 → 估算 → 预演 → 运行 → 汇报”
+- 用低成本模型批量探索，再把少数结果升级到高质量模型
+- AI 漫剧 / 短剧 / 分镜团队批量生成一组角色、场景、动作和情绪镜头
+
+不适合：
+
+- 只想让 AI 帮你润色 prompt，但不调用 Dreamifly 生成
+- 想用 Midjourney、ComfyUI、fal.ai、Replicate 等其他平台
+- 不希望本地保存 prompt、日志或生成文件
+- 没有确认预算却想直接跑视频或高成本模型
+
 ---
 
 ## 目录
@@ -43,6 +74,8 @@
 - [示例](#示例)
 - [支持的模型](#支持的模型)
 - [风格预设](#风格预设)
+- [Skill 架构](#skill-架构)
+- [典型联动案例](#典型联动案例)
 - [准备：获取登录态 Cookie（最重要）](#准备获取登录态-cookie最重要)
 - [快速开始](#快速开始)
 - [输出与产物](#输出与产物)
@@ -176,6 +209,176 @@ flowchart LR
 | `pixel` | 街机像素 | | |
 
 用法：`a cat by a window | style=oil | model=Z-Image-Turbo`（或全局 `--style oil`）。
+
+---
+
+## Skill 架构
+
+这个仓库按“中心短，辐射厚”的方式组织 Agent 能力：
+
+```text
+SKILL.md                         # 短入口：触发边界、执行协议、安全规则
+references/
+├── model-selection.md            # 模型选择、参数、成本确认
+├── output-contract.md            # 结果文件、汇报格式、隐私边界
+├── gotchas.md                    # 真实失败经验：不要盲重试、不要泄露 Cookie
+└── evals.md                      # 应该加载 / 不该加载 / 必须确认的测试用例
+.cursor/skills/dreamifly-batch/   # Cursor 项目级 Skill
+.claude/skills/dreamifly-batch/   # Claude Code 项目级 Skill
+examples/prompts.jsonl            # 结构化队列示例
+tests/                            # 解析、校验、估算的零 API 单元测试
+```
+
+`SKILL.md` 不塞满全部知识，只告诉 Agent 何时加载、按什么顺序执行、哪些风险必须停下。模型选择、失败经验、输出契约和 eval 放在 `references/`，需要时再读，减少上下文负担。
+
+---
+
+## 典型联动案例
+
+`dreamifly-batch` 可以作为其他 Skills 的“媒体生成执行层”：上游 Skill 负责理解内容、制定风格、写 prompt 和 QA；本工具负责校验、估算、调用 Dreamifly、下载、记录和失败重试。
+
+任何需要生图/生视频的 Skill，都可以复用这个模式：**它负责“该生成什么”，`dreamifly-batch` 负责“安全稳定地生成出来”。**
+
+### 案例图 + 对应 Skill
+
+这些图都由 `dreamifly-batch` 调用 Dreamifly 模型生成，展示的是“上游 Skill 决定表达，`dreamifly-batch` 执行生成”的交接方式。
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="./docs/skill-cases/case_xiaohei_gpt.png" alt="小黑正文配图" />
+      <br />
+      <strong>中文正文配图</strong>
+      <br />
+      上游：<a href="https://github.com/helloianneo/ian-xiaohei-illustrations">ian-xiaohei-illustrations</a>
+      <br />
+      位置：读取 shot list / prompt，用 <code>gpt-image-2</code> 一次生成最终正文配图。
+    </td>
+    <td width="50%" valign="top">
+      <img src="./docs/skill-cases/case-social-card.png" alt="社交图文卡片链路" />
+      <br />
+      <strong>社交图文卡片</strong>
+      <br />
+      上游：<a href="https://github.com/op7418/guizang-social-card-skill">guizang-social-card-skill</a>
+      <br />
+      位置：缺少照片/截图/图库素材时，批量补齐封面图、章节图、隐喻图、背景图。
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="./docs/skill-cases/case-slide-deck.png" alt="PPT 配图链路" />
+      <br />
+      <strong>PPT / Slide Deck 配图</strong>
+      <br />
+      上游：<a href="https://github.com/jimliu/baoyu-design">baoyu-design</a>
+      <br />
+      位置：生成 PPT 页面所需配图，再由设计 Skill 插入 HTML/PPTX。
+    </td>
+    <td width="50%" valign="top">
+      <img src="./docs/skill-cases/case-animation-video.png" alt="动画视频素材链路" />
+      <br />
+      <strong>动画视频素材</strong>
+      <br />
+      上游：<a href="https://github.com/jimliu/baoyu-design">baoyu-design</a>
+      <br />
+      位置：生成场景图、角色图、背景图，再进入时间轴动画和 MP4 导出。
+    </td>
+  </tr>
+</table>
+
+参考/对照项目：[`baoyu-image-gen`](https://github.com/JimLiu/baoyu-skills/tree/main/skills/baoyu-image-gen) 是通用 AI 生图后端 Skill，支持多 provider / Codex CLI，可作为 `dreamifly-batch` 的架构对照。
+
+完整记录见 [`docs/xiaohei-integration.md`](./docs/xiaohei-integration.md)。更多跨 Skill 定位见 [`docs/skill-ecosystem.md`](./docs/skill-ecosystem.md)。
+
+以 `ian-xiaohei-illustrations` 为例：
+
+```text
+中文文章 / 观点
+  ↓
+ian-xiaohei-illustrations
+  - 提炼认知锚点
+  - 产出 shot list
+  - 写小黑正文配图 prompt
+  ↓
+dreamifly-batch
+  - 写入 jobs.jsonl
+  - validate / estimate / dry-run / check
+  - 调用 gpt-image-2 生成最终图
+  - 写入 images/ + results.jsonl
+  ↓
+正文配图 / 图文卡片 / PPT / 发布 Skill
+```
+
+实测结论：
+
+- `gpt-image-2` 最适合小黑正文配图“一次出图”，中文短标注、白底手绘、小黑动作和留白都更稳定。
+- `Z-Image-Turbo` 适合低成本草稿探索，但容易加标题或写错字。
+- `Qwen-Image-Edit` 可用于局部修复，但修图时必须显式带 `16:9`，否则可能裁切。
+
+同理，像 [`baoyu-design`](https://github.com/jimliu/baoyu-design) 这类 PPT、动画视频、网站设计 Skill，也可以把 `dreamifly-batch` 当作本地图像生成后端：它决定哪一页/哪一幕需要配图，本工具负责批量生成、下载并通过 `results.jsonl` 把文件路径交回去。相比通用 image backend，`dreamifly-batch` 的优势是 Dreamifly 模型、成本确认、断点续跑和图片/视频统一落地。
+
+社交图文类 Skill 也是同一模式：`guizang-social-card-skill` 决定内容品类、版式骨架、文字压图和渲染尺寸；`dreamifly-batch` 只在缺少合适素材时作为 AI 生图后端介入。这样上游 Skill 不需要自己维护模型调用、下载、失败重试和成本确认。
+
+### AI 漫剧 / 短剧批量分镜
+
+另一个很典型的使用场景是 AI 漫剧、短剧、动态漫画团队。工作人员可以让自己的 Agent 先拆分剧情和分镜，再把每个镜头写进 `jobs.jsonl`，最后交给 `dreamifly-batch` 排队生成：
+
+```text
+剧本 / 分镜表
+  ↓
+Agent
+  - 拆镜头
+  - 写角色设定
+  - 写场景 prompt
+  - 统一比例和风格
+  ↓
+dreamifly-batch
+  - validate / estimate / dry-run / check
+  - 批量生成角色近景、环境、动作镜头、情绪镜头
+  - 下载到 images/ 或指定素材目录
+  - results.jsonl 记录每个镜头的文件路径
+  ↓
+剪辑 / 动画 / 视频 Skill
+```
+
+示例：同一段 AI 漫剧的 4 个镜头，用低成本动漫模型批量生成。
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="./docs/skill-cases/ai-comic/ai_comic_ffaba646652c4c20.png" alt="AI 漫剧建立镜头" />
+      <br />
+      <strong>01 建立镜头</strong>
+      <br />
+      先交代角色所在的雨夜街巷和整体气氛。
+    </td>
+    <td width="50%" valign="top">
+      <img src="./docs/skill-cases/ai-comic/ai_comic_eddd52baf16afe9b.png" alt="AI 漫剧角色近景" />
+      <br />
+      <strong>02 角色近景</strong>
+      <br />
+      用近景锁定主角表情和情绪状态。
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="./docs/skill-cases/ai-comic/ai_comic_a88cefdc57ceb6ba.png" alt="AI 漫剧动作冲突" />
+      <br />
+      <strong>03 动作冲突</strong>
+      <br />
+      生成追逐、战斗或事件推进的关键帧。
+    </td>
+    <td width="50%" valign="top">
+      <img src="./docs/skill-cases/ai-comic/ai_comic_21819ba90b46fc14.png" alt="AI 漫剧情绪收束" />
+      <br />
+      <strong>04 情绪收束</strong>
+      <br />
+      用远景或静态镜头收束一组分镜。
+    </td>
+  </tr>
+</table>
+
+这种场景可以先用 `Wai-SDXL-V170` 低成本探索分镜方向；如果需要更强角色一致性、复杂构图或最终宣传图，再把少数关键镜头升级到 `gpt-image-2` / `nano-banana-2`，运行前按高成本规则确认。
 
 ---
 
