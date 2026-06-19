@@ -49,6 +49,12 @@
 |---|---|
 | ![ref](./docs/sample-japanese-garden.png) | ![i2i](./docs/sample-i2i-winter.png) |
 
+**文生视频**（happyhorse-1.0 · `a cinematic timelapse of a city skyline at sunset` · 5s 720P，真实生成）
+
+![t2v](./docs/sample-t2v-city-sunset.gif)
+
+▶️ [完整视频 sample-t2v-city-sunset.mp4](./docs/sample-t2v-city-sunset.mp4)（1280×720 · h264 · 5s）
+
 ---
 
 ## 支持的模型

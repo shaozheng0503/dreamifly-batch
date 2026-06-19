@@ -28,6 +28,12 @@ pre-flight check, and multi-model routing — write prompts into `prompts.txt`, 
 |---|---|
 | ![ref](./docs/sample-japanese-garden.png) | ![i2i](./docs/sample-i2i-winter.png) |
 
+**Text-to-video** (happyhorse-1.0 · `a cinematic timelapse of a city skyline at sunset` · 5s 720P, real output)
+
+![t2v](./docs/sample-t2v-city-sunset.gif)
+
+▶️ [Full video sample-t2v-city-sunset.mp4](./docs/sample-t2v-city-sunset.mp4) (1280×720 · h264 · 5s)
+
 ## Models
 
 Run `python3 dreamify.py --list-models` for the live list.
