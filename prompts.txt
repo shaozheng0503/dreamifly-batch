@@ -1,0 +1,6 @@
+# 每行一个 prompt。脚本会从上往下逐条生成。
+# 以 # 开头的行和空行会被忽略。
+# 处理完的会被移动到 done.txt（带时间戳和图片文件名）。
+# 在下面直接加你的提示词，例如：
+
+a cyberpunk city street in the rain, neon reflections, cinematic

@@ -1,0 +1,12 @@
+{
+  "model": "gpt-image-2",
+  "width": 1024,
+  "height": 1024,
+  "aspectRatio": "1:1",
+  "batch_size": 1,
+  "steps": null,
+  "negative_prompt": "",
+  "delay_between_seconds": 5,
+  "max_retries": 2,
+  "request_timeout_seconds": 300
+}

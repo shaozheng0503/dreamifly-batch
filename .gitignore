@@ -1,0 +1,15 @@
+# 敏感：真实登录态，绝不提交
+config/cookie.txt
+
+# 运行产物
+run.log
+done.txt
+images/*
+!images/.gitkeep
+
+# Python / 系统
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+venv/
