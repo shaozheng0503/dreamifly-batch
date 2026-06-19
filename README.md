@@ -120,7 +120,7 @@ flowchart LR
 | `gpt-image-2` | 文生图 + 图生图 · 中文 | 3 | — | 是 | 顶级 |
 | `nano-banana-2` | 文生图 + 图生图 · 中文 | 3 | — | 是 | ~25+ |
 
-> `steps` 由脚本按模型自动填（Wai 必须 20/30、Z-Image-Turbo 10/20），无需手填。
+> `steps` 由脚本按模型自动填（Wai 必须 20、Z-Image-Turbo 10），无需手填。
 
 ### 生视频（`/api/generate-video`，单价高、较慢）
 
@@ -284,7 +284,7 @@ python3 dreamify.py --model Wai-SDXL-V170 --aspect 16:9
 
 ## 提示词内联参数
 
-在 `prompts.txt` 一行内用 `|` 分隔，逐条覆盖配置，可任意组合：
+在 `prompts.txt` 一行内用 `|` 分隔，逐条覆盖配置，可任意组合。`#` 开头的行和空行会被忽略（可用于注释/暂存）。
 
 | 片段 | 含义 | 适用 |
 |---|---|---|

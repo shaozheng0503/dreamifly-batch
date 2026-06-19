@@ -16,10 +16,11 @@
      dreamifly.com 的整行 Cookie 填进 `config/cookie.txt`（见 README「获取登录态 Cookie」）。
 2. **选模型 + 写提示词**：把用户每条提示词作为单独一行写入 `prompts.txt`，用内联语法带参数。
    不确定有哪些模型先 `python3 dreamify.py --list-models`。
+   `#` 开头的行和空行会被忽略，可用来暂存/注释。
 3. **预演**：`python3 dreamify.py --dry-run` 确认每条解析成 生图/视频、模式、参数是否符合预期。
-4. **成本确认（重要）**：涉及视频或贵模型（`nano-banana-2`）时，先告知用户大致积分消耗并征求同意。
+4. **成本确认（重要）**：单次积分 ≥5 的运行前必须告知用户并征求同意——视频（Wan2.2 ~200、happyhorse ~150+）、`nano-banana-2`（~25+）必须确认；便宜模型（Wai/Z-Image-Turbo/Qwen-Image-Edit ≤2 积分）可直接跑。
 5. **运行**：`./run.sh`（或 `./run.sh 3` / `python3 dreamify.py -n 3`）。
-6. **汇报**：读 `run.log` 末尾与 `done.txt`，回报成功/失败数量与文件路径。
+6. **汇报**：读 `run.log` 末尾与 `done.txt`，回报成功/失败数量与文件路径。失败项保留在 `prompts.txt` 可直接重跑；401/402 先引导用户更新 cookie/充值，不要盲目重跑。
 
 ## 模型速查
 - 生图：`Wai-SDXL-V150`/`Wai-SDXL-V170`（动漫·便宜·免登录）、`Z-Image-Turbo`（中文·快·免登录）、
@@ -40,5 +41,5 @@ city timelapse | model=happyhorse-1.0 | secs=5 | res=720P
 ```
 
 ## 注意
-- `config/cookie.txt` 是用户私密登录态，**不要打印、提交或外传**。
+- ⚠️ `config/cookie.txt` 是用户私密登录态，等同于登录凭证——**不要打印、外传、写入聊天回复、或提交到 git**。汇报时只说"已加载 N 字符"。
 - 401=登录失效（让用户更新 cookie 重跑）；402=积分不足；视频不自动重试。

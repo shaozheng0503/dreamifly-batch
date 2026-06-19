@@ -198,10 +198,11 @@ def load_cookie():
     path = PATHS["cookie"]
     if not os.path.exists(path):
         return ""
-    for ln in open(path, encoding="utf-8"):
-        s = ln.strip()
-        if s and not s.startswith("#"):
-            return s
+    with open(path, encoding="utf-8") as f:
+        for ln in f:
+            s = ln.strip()
+            if s and not s.startswith("#"):
+                return s
     return ""
 
 

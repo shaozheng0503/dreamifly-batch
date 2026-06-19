@@ -62,7 +62,7 @@ Run `python3 dreamify.py --list-models` for the live list.
 | `gpt-image-2` | t2i + i2i · CN | 3 | — | yes | premium |
 | `nano-banana-2` | t2i + i2i · CN | 3 | — | yes | ~25+ |
 
-`steps` is auto-filled per model (Wai needs 20/30, Z-Image-Turbo 10/20).
+`steps` is auto-filled per model (Wai needs 20, Z-Image-Turbo 10).
 
 **Video (`/api/generate-video`, pricier, slower)**
 
