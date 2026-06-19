@@ -8,7 +8,7 @@
 
 Batch-generate and download **images and videos** from a list of prompts via the
 [Dreamifly](https://dreamifly.com) API. Queueing, throttling, auto-retry, resume,
-pre-flight check, and multi-model routing — write prompts into `prompts.txt`, run one command.
+pre-flight check, validation, cost estimates, structured `results.jsonl`, retryable failures, caching, and multi-model routing — write prompts into `prompts.txt`, run one command.
 
 | | |
 |---|---|
@@ -16,7 +16,7 @@ pre-flight check, and multi-model routing — write prompts into `prompts.txt`, 
 | 📦 Repo | https://github.com/shaozheng0503/dreamifly-batch |
 | 🌍 中文 | [README.md](./README.md) |
 
-> 🤖 This repo is also a **[Claude Code](https://claude.com/claude-code) Skill / Codex agent tool**: once installed,
+> 🤖 This repo is also a **Cursor / [Claude Code](https://claude.com/claude-code) Skill / Codex agent tool**: once installed,
 > just tell the AI "batch-generate these images / make a video from this picture" and it drives the tool for you.
 > 🐍 **Zero dependencies**: Python 3 standard library only.
 
@@ -73,6 +73,19 @@ Run `python3 dreamify.py --list-models` for the live list.
 
 Video mode is auto-derived: no image → text-to-video, 1 → image-to-video, many → reference-to-video.
 
+### Model selection
+
+| Need | Recommended model |
+|---|---|
+| Cheap anime batch images | `Wai-SDXL-V150` or `Wai-SDXL-V170` |
+| Chinese/general fast text-to-image | `Z-Image-Turbo` |
+| Image editing / add elements / restyle | `Qwen-Image-Edit` with `img=` |
+| High-quality Chinese or complex images | `gpt-image-2`; use `nano-banana-2` only when higher cost is accepted |
+| Image-to-video from one source image | `Wan2.2-I2V-Lightning` |
+| Text-to-video or multi-reference video | `happyhorse-1.0` |
+
+Cost guardrail: any run estimated at 5+ credits per item must be confirmed first. Do not run video or `nano-banana-2` without explicit approval.
+
 ## Styles
 
 All 11 platform styles are built in via `style=` (prepended to the prompt). Same prompt `a cat sitting by a window`, different `style=` (Z-Image-Turbo):
@@ -107,8 +120,13 @@ cp config/cookie.txt.example config/cookie.txt   # fill in if using login models
 python3 dreamify.py --list-models
 python3 dreamify.py --check
 echo "anime girl with flowers | model=Wai-SDXL-V150" >> prompts.txt
+python3 dreamify.py --validate
+python3 dreamify.py --estimate
+python3 dreamify.py --dry-run
 ./run.sh
 ```
+
+Outputs go to `images/`, successful prompts are recorded in `done.txt`, every processed item is appended to `results.jsonl`, and failures are appended to `failed.jsonl`.
 
 ## Switching models
 
@@ -130,14 +148,28 @@ python3 dreamify.py --model Z-Image-Turbo   # whole run
 
 `model=` · `16:9` · `1024x768` · `x2` (≤4) · `seed=` · `steps=` · `neg=` · `img=path,or,URL` · `secs=` · `res=720P`
 
+Structured job files are also supported via `--prompts jobs.jsonl` / `.json` / `.yaml`:
+
+```jsonl
+{"prompt":"a neon cat in rain","model":"Z-Image-Turbo","aspectRatio":"16:9","batch_size":1}
+{"prompt":"edit this, add snow","model":"Qwen-Image-Edit","images":["ref.png"]}
+```
+
 ## CLI
 
 ```bash
 python3 dreamify.py --list-models   # list models (online)
 python3 dreamify.py --check          # pre-flight only
+python3 dreamify.py --validate       # validate queue, no API calls
+python3 dreamify.py --estimate       # estimate cost, no API calls
 python3 dreamify.py --dry-run        # preview, no API calls
+python3 dreamify.py --summary        # summarize results.jsonl
+python3 dreamify.py --retry-failed   # append failed.jsonl back to prompts.txt
 python3 dreamify.py 3                 # first 3 only
+python3 dreamify.py --no-cache
+python3 dreamify.py --name-template "{model}_{date}_{index}_{hash}.{ext}"
 python3 dreamify.py --no-sidecar
+python3 dreamify.py --results-file out.jsonl
 ```
 
 ## Use it inside an AI agent
@@ -145,15 +177,17 @@ python3 dreamify.py --no-sidecar
 The repo ships `SKILL.md` (Claude Code) and `AGENTS.md` (Codex / generic agents).
 
 - **Claude Code**: `./install.sh` → installs to `~/.claude/skills/`, then ask in natural language.
+- **Cursor**: `./install.sh cursor` for `~/.cursor/skills/`, or `./install.sh .cursor` for a project-local skill.
 - **Codex**: `cd` into the repo and run `codex`; it reads `AGENTS.md` automatically.
 - **Any agent**: feed it `SKILL.md`/`AGENTS.md`, let it (1) append prompts to `prompts.txt`, (2) run
-  `python3 dreamify.py`, (3) read `run.log`. Any agent that can write files and run shell can use it.
+  `python3 dreamify.py`, (3) read `results.jsonl` and `run.log`. Any agent that can write files and run shell can use it.
 
 ## Notes
 
 - 💸 Video is expensive (Wan ~200, happyhorse ~150+) and slow; no auto-retry for video.
 - `img=` image-to-image is verified: local file / URL / data URI, auto base64, ≤10MB, ≤9 images, login required.
 - 401 = re-copy your cookie; 402 = out of credits. Failed prompts stay in `prompts.txt` to retry.
+- `prompts.txt`, `done.txt`, `run.log`, `results.jsonl`, `failed.jsonl`, and `images/*` may contain private prompts or outputs and are gitignored. Use `prompts.example.txt` for shareable examples.
 
 ## License
 

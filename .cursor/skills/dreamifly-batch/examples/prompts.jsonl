@@ -1,0 +1,3 @@
+{"prompt":"a neon cat in a rainy cyberpunk street","model":"Z-Image-Turbo","aspectRatio":"16:9","batch_size":1}
+{"prompt":"masterpiece, 1girl, sakura, soft light","model":"Wai-SDXL-V150","style":"anime","aspectRatio":"1:1"}
+{"prompt":"edit this, add snow to the scene","model":"Qwen-Image-Edit","images":["ref.png"]}

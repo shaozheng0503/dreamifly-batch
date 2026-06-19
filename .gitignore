@@ -2,8 +2,11 @@
 config/cookie.txt
 
 # 运行产物
+prompts.txt
 run.log
 done.txt
+results.jsonl
+failed.jsonl
 images/*
 !images/.gitkeep
 
@@ -14,5 +17,7 @@ __pycache__/
 .venv/
 venv/
 
-# 本地 Claude Code / 定时任务等临时产物
-.claude/
+# 本地 Claude Code 临时产物；允许提交项目级 skill
+.claude/*
+!.claude/skills/
+!.claude/skills/**

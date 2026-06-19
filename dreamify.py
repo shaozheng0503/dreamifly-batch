@@ -140,11 +140,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PATHS = {
     "prompts": os.path.join(HERE, "prompts.txt"),
     "done": os.path.join(HERE, "done.txt"),
+    "results": os.path.join(HERE, "results.jsonl"),
+    "failed": os.path.join(HERE, "failed.jsonl"),
     "images": os.path.join(HERE, "images"),
     "config": os.path.join(HERE, "config", "config.json"),
     "cookie": os.path.join(HERE, "config", "cookie.txt"),
 }
 LOG_FILE = os.path.join(HERE, "run.log")
+HIGH_COST_THRESHOLD = 5
 
 CONFIG_SCHEMA = {
     "model": (str, lambda v: len(v) > 0),
@@ -342,16 +345,135 @@ def parse_prompt_line(line):
     return prompt, overrides
 
 
-def read_prompt_queue():
-    if not os.path.exists(PATHS["prompts"]):
+def prompt_record_to_line(record):
+    """把 JSON/JSONL 任务对象转换成兼容内联语法的一行。"""
+    if not isinstance(record, dict):
+        raise ValueError("任务必须是 JSON 对象")
+    prompt = str(record.get("prompt") or "").strip()
+    if not prompt:
+        raise ValueError("任务缺少 prompt")
+    parts = [prompt]
+    mapping = [
+        ("model", "model"),
+        ("style", "style"),
+        ("seed", "seed"),
+        ("steps", "steps"),
+        ("negative_prompt", "neg"),
+        ("neg", "neg"),
+        ("seconds", "secs"),
+        ("secs", "secs"),
+        ("resolution", "res"),
+        ("res", "res"),
+    ]
+    for src, dst in mapping:
+        if src in record and record[src] not in (None, ""):
+            parts.append(f"{dst}={record[src]}")
+    if record.get("aspectRatio"):
+        parts.append(str(record["aspectRatio"]))
+    if record.get("aspect"):
+        parts.append(str(record["aspect"]))
+    if record.get("width") and record.get("height"):
+        parts.append(f"{int(record['width'])}x{int(record['height'])}")
+    if record.get("batch_size"):
+        parts.append(f"x{int(record['batch_size'])}")
+    if record.get("images") is not None:
+        imgs = record["images"]
+        if isinstance(imgs, str):
+            imgs = [imgs]
+        parts.append("img=" + ",".join(str(x) for x in imgs if str(x).strip()))
+    elif record.get("img") is not None:
+        imgs = record["img"]
+        if isinstance(imgs, str):
+            imgs = [imgs]
+        parts.append("img=" + ",".join(str(x) for x in imgs if str(x).strip()))
+    return " | ".join(parts)
+
+
+def _parse_scalar(value):
+    value = value.strip()
+    if not value:
+        return ""
+    if (value[0], value[-1]) in (('"', '"'), ("'", "'")):
+        return value[1:-1]
+    low = value.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    try:
+        return int(value)
+    except ValueError:
+        return value
+
+
+def _load_simple_yaml_jobs(text):
+    """轻量解析 README 里建议的 prompts: 列表；完整 YAML 请先转 JSON/JSONL。"""
+    jobs, current = [], None
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped == "prompts:":
+            continue
+        if stripped.startswith("- "):
+            if current:
+                jobs.append(current)
+            current = {}
+            rest = stripped[2:].strip()
+            if rest:
+                if ":" not in rest:
+                    raise ValueError(f"无法解析 YAML 列表项：{raw}")
+                key, val = rest.split(":", 1)
+                current[key.strip()] = _parse_scalar(val)
+        elif current is not None and ":" in stripped:
+            key, val = stripped.split(":", 1)
+            current[key.strip()] = _parse_scalar(val)
+        else:
+            raise ValueError(f"无法解析 YAML 行：{raw}")
+    if current:
+        jobs.append(current)
+    return jobs
+
+
+def load_prompt_entries(path):
+    if not os.path.exists(path):
         return [], []
-    lines = open(PATHS["prompts"], encoding="utf-8").read().splitlines()
+    ext = os.path.splitext(path)[1].lower()
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    if ext == ".jsonl":
+        lines, pending = [], []
+        for i, raw in enumerate(text.splitlines()):
+            s = raw.strip()
+            if not s or s.startswith("#"):
+                lines.append(raw)
+                continue
+            try:
+                line = prompt_record_to_line(json.loads(s))
+            except Exception as e:
+                line = f"# INVALID JSONL line {i + 1}: {e}"
+            lines.append(line)
+            if not line.startswith("#"):
+                pending.append((i, line))
+        return lines, pending
+    if ext == ".json":
+        data = json.loads(text or "{}")
+        jobs = data.get("jobs") or data.get("prompts") if isinstance(data, dict) else data
+        lines = [prompt_record_to_line(x) for x in (jobs or [])]
+        return lines, [(i, ln) for i, ln in enumerate(lines)]
+    if ext in (".yaml", ".yml"):
+        lines = [prompt_record_to_line(x) for x in _load_simple_yaml_jobs(text)]
+        return lines, [(i, ln) for i, ln in enumerate(lines)]
+    lines = text.splitlines()
     pending = [(i, ln.strip()) for i, ln in enumerate(lines)
                if ln.strip() and not ln.strip().startswith("#")]
     return lines, pending
 
 
+def read_prompt_queue():
+    return load_prompt_entries(PATHS["prompts"])
+
+
 def remove_lines(done_indices):
+    if os.path.splitext(PATHS["prompts"])[1].lower() in (".json", ".jsonl", ".yaml", ".yml"):
+        return
     lines = open(PATHS["prompts"], encoding="utf-8").read().splitlines()
     kept = [ln for i, ln in enumerate(lines) if i not in done_indices]
     with open(PATHS["prompts"], "w", encoding="utf-8") as f:
@@ -362,6 +484,243 @@ def append_done(prompt, filenames, note=""):
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(PATHS["done"], "a", encoding="utf-8") as f:
         f.write(f"{ts}\t{prompt}\t{', '.join(filenames) or note}\n")
+
+
+def append_result(record):
+    """Append one machine-readable result row without exposing cookie or base64 payloads."""
+    item = dict(record)
+    item.setdefault("timestamp", datetime.datetime.now().isoformat(timespec="seconds"))
+    with open(PATHS["results"], "a", encoding="utf-8") as f:
+        f.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def append_failed(record):
+    item = dict(record)
+    item.setdefault("timestamp", datetime.datetime.now().isoformat(timespec="seconds"))
+    with open(PATHS["failed"], "a", encoding="utf-8") as f:
+        f.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def iter_jsonl(path):
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for raw in f:
+            s = raw.strip()
+            if not s:
+                continue
+            try:
+                yield json.loads(s)
+            except json.JSONDecodeError:
+                continue
+
+
+def cost_number(label):
+    if label is None:
+        return None
+    s = str(label)
+    nums = re.findall(r"\d+(?:\.\d+)?", s)
+    if nums:
+        return float(nums[0])
+    if s in ("顶级", "premium"):
+        return HIGH_COST_THRESHOLD
+    return None
+
+
+def high_cost_model(model):
+    meta = VIDEO_MODELS.get(model) or IMAGE_MODELS.get(model) or {}
+    n = cost_number(meta.get("cost"))
+    return bool(n is not None and n >= HIGH_COST_THRESHOLD)
+
+
+def job_hash(record):
+    stable = {
+        "type": record.get("type"),
+        "model": record.get("model"),
+        "mode": record.get("mode"),
+        "raw": record.get("raw"),
+        "params": record.get("params", {}),
+    }
+    params = dict(stable["params"])
+    params.pop("seed", None)
+    stable["params"] = params
+    blob = json.dumps(stable, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def successful_cache():
+    cache = {}
+    for rec in iter_jsonl(PATHS["results"]) or []:
+        if rec.get("status") == "success" and rec.get("job_hash"):
+            cache[rec["job_hash"]] = rec
+    return cache
+
+
+def analyze_prompt(raw, cfg, cli):
+    prompt, overrides = parse_prompt_line(raw)
+    model = resolve_model(overrides, cli, cfg)
+    issues, warnings = [], []
+    if model in VIDEO_MODELS:
+        body, mode = build_video_body(prompt, model, cfg, overrides, cli)
+        meta = VIDEO_MODELS[model]
+        imgs = overrides.get("images", [])
+        if meta.get("needs_image") and len(imgs) != 1:
+            issues.append(f"{model} 必须且只能提供 1 张源图（img=路径）")
+        if mode == "reference-to-video" and len(imgs) > meta.get("max_reference_images", 9):
+            warnings.append(f"参考图超过上限，只会使用前 {meta.get('max_reference_images', 9)} 张")
+        record = {
+            "prompt": prompt, "raw": raw, "type": "video", "model": model, "mode": mode,
+            "cost_estimate": meta.get("cost"),
+            "params": {
+                "width": body.get("width"), "height": body.get("height"),
+                "aspectRatio": body.get("aspectRatio"), "videoSeconds": body.get("videoSeconds"),
+                "resolution": body.get("resolution"), "source_image": body.get("image"),
+                "reference_images": body.get("referenceImages", []),
+            },
+        }
+    else:
+        body, seed = build_body(prompt, cfg, overrides, cli)
+        meta = IMAGE_MODELS.get(model)
+        if not meta:
+            warnings.append(f"未知模型 {model}，建议先 --list-models 确认")
+            meta = {}
+        imgs = body.get("images", [])
+        if meta.get("i2i") is False and imgs:
+            issues.append(f"{model} 不支持 img= 图生图")
+        if meta.get("t2i") is False and not imgs:
+            issues.append(f"{model} 是图生图模型，必须提供 img=")
+        max_images = meta.get("max_images", 0)
+        if max_images and len(imgs) > max_images:
+            issues.append(f"{model} 最多支持 {max_images} 张参考图")
+        if int(body.get("batch_size", 1)) > 4:
+            issues.append("xN/batch_size 不能超过 4")
+        record = {
+            "prompt": prompt, "raw": raw, "type": "image", "model": model,
+            "cost_estimate": meta.get("cost"),
+            "params": {
+                "width": body.get("width"), "height": body.get("height"),
+                "aspectRatio": body.get("aspectRatio"), "batch_size": body.get("batch_size"),
+                "seed": seed, "reference_images": imgs,
+                "negative_prompt": body.get("negative_prompt", ""),
+            },
+        }
+    for ref in overrides.get("images", []):
+        if ref.startswith(("http://", "https://", "//", "data:")):
+            continue
+        if not os.path.exists(os.path.abspath(os.path.expanduser(ref))):
+            issues.append(f"参考图不存在：{ref}")
+    if high_cost_model(model):
+        warnings.append("高成本模型，真实运行前需要用户明确确认")
+    record["job_hash"] = job_hash(record)
+    return record, issues, warnings
+
+
+def analyze_queue(cfg, cli, pending=None):
+    if pending is None:
+        _, pending = read_prompt_queue()
+    rows = []
+    for n, (_, raw) in enumerate(pending, 1):
+        try:
+            record, issues, warnings = analyze_prompt(raw, cfg, cli)
+        except Exception as e:
+            record, issues, warnings = {"raw": raw, "prompt": raw, "model": None}, [str(e)], []
+        rows.append({"index": n, "record": record, "issues": issues, "warnings": warnings})
+    return rows
+
+
+def summarize_estimate(rows):
+    by_model, total_min, high_cost = {}, 0.0, []
+    for row in rows:
+        rec = row["record"]
+        model = rec.get("model") or "unknown"
+        by_model[model] = by_model.get(model, 0) + 1
+        n = cost_number(rec.get("cost_estimate"))
+        if n is not None:
+            count = int(rec.get("params", {}).get("batch_size") or 1)
+            total_min += n * count
+        if high_cost_model(model):
+            high_cost.append(row["index"])
+    return {"total": len(rows), "by_model": by_model, "known_min_credits": round(total_min, 3), "high_cost_indices": high_cost}
+
+
+def validate_queue(cfg, cli, *, as_json=False):
+    rows = analyze_queue(cfg, cli)
+    summary = summarize_estimate(rows)
+    has_issues = any(r["issues"] for r in rows)
+    if as_json:
+        print(json.dumps({"ok": not has_issues, "summary": summary, "items": rows}, ensure_ascii=False, indent=2))
+        return 0 if not has_issues else 1
+    log("—— 队列校验 ——")
+    for row in rows:
+        rec = row["record"]
+        mark = "❌" if row["issues"] else ("⚠️" if row["warnings"] else "✅")
+        log(f"  {mark} [{row['index']}] {rec.get('model')} {rec.get('prompt', '')[:42]}")
+        for it in row["issues"]:
+            log(f"      ❌ {it}")
+        for it in row["warnings"]:
+            log(f"      ⚠️ {it}")
+    log(f"校验结束：{summary['total']} 条，模型分布 {summary['by_model']}，已知最低约 {summary['known_min_credits']} 积分")
+    return 0 if not has_issues else 1
+
+
+def estimate_queue(cfg, cli, *, as_json=False):
+    rows = analyze_queue(cfg, cli)
+    summary = summarize_estimate(rows)
+    if as_json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    else:
+        log("—— 成本预估 ——")
+        log(f"  待处理：{summary['total']} 条")
+        log(f"  模型分布：{summary['by_model']}")
+        log(f"  已知最低约：{summary['known_min_credits']} 积分（未知/顶级模型以阈值估算）")
+        if summary["high_cost_indices"]:
+            log(f"  ⚠️ 高成本项：{summary['high_cost_indices']}，真实运行前必须确认")
+    return 0
+
+
+def summarize_results(*, as_json=False):
+    stats = {"total": 0, "success": 0, "failed": 0, "fatal": 0, "cached": 0, "by_model": {}, "files": [], "errors": {}}
+    for rec in iter_jsonl(PATHS["results"]) or []:
+        stats["total"] += 1
+        status = rec.get("status") or "unknown"
+        if status in stats:
+            stats[status] += 1
+        model = rec.get("model") or "unknown"
+        stats["by_model"][model] = stats["by_model"].get(model, 0) + 1
+        stats["files"].extend(rec.get("files") or [])
+        err = rec.get("error")
+        if err:
+            stats["errors"][err] = stats["errors"].get(err, 0) + 1
+    if as_json:
+        print(json.dumps(stats, ensure_ascii=False, indent=2))
+    else:
+        log("—— 结果汇总 ——")
+        log(f"  总记录 {stats['total']}：成功 {stats['success']}，失败 {stats['failed']}，致命 {stats['fatal']}，缓存 {stats['cached']}")
+        log(f"  模型分布：{stats['by_model']}")
+        if stats["files"]:
+            log(f"  文件：{', '.join(stats['files'][-10:])}")
+        if stats["errors"]:
+            log(f"  错误：{stats['errors']}")
+    return 0
+
+
+def retry_failed():
+    records = list(iter_jsonl(PATHS["failed"]) or [])
+    raws = []
+    seen = set()
+    for rec in records:
+        raw = rec.get("raw")
+        if raw and raw not in seen:
+            raws.append(raw)
+            seen.add(raw)
+    if not raws:
+        log("failed.jsonl 里没有可重试任务。")
+        return 0
+    with open(PATHS["prompts"], "a", encoding="utf-8") as f:
+        for raw in raws:
+            f.write(raw.rstrip() + "\n")
+    log(f"已把 {len(raws)} 条失败任务追加回 prompts.txt。")
+    return 0
 
 
 def slugify(text, maxlen=40):
@@ -592,7 +951,30 @@ def write_sidecar(media_path, meta):
         log(f"  ⚠️ 写 metadata 边车失败：{e}")
 
 
-def download(url, prompt, idx, kind="image"):
+def render_name_template(template, *, prompt, idx, kind, ext, model="", job_hash_value=""):
+    now = datetime.datetime.now()
+    values = {
+        "date": now.strftime("%Y%m%d"),
+        "time": now.strftime("%H%M%S"),
+        "datetime": now.strftime("%Y%m%d_%H%M%S"),
+        "prompt": slugify(prompt),
+        "index": idx,
+        "kind": kind,
+        "type": kind,
+        "model": slugify(model or "model"),
+        "hash": job_hash_value or "",
+        "ext": ext.lstrip("."),
+    }
+    try:
+        name = template.format(**values)
+    except KeyError as e:
+        raise ValueError(f"未知命名模板字段：{e}")
+    if not os.path.splitext(name)[1]:
+        name += ext
+    return os.path.basename(name)
+
+
+def download(url, prompt, idx, kind="image", *, model="", template=None, job_hash_value=""):
     if url.startswith("//"):
         url = "https:" + url
     elif url.startswith("/"):
@@ -602,7 +984,11 @@ def download(url, prompt, idx, kind="image"):
     ext = os.path.splitext(url.split("?")[0])[1].lower()
     if ext not in allowed:
         ext = default
-    fn = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{slugify(prompt)}_{idx}{ext}"
+    if template:
+        fn = render_name_template(template, prompt=prompt, idx=idx, kind=kind, ext=ext,
+                                  model=model, job_hash_value=job_hash_value)
+    else:
+        fn = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{slugify(prompt)}_{idx}{ext}"
     path = os.path.join(PATHS["images"], fn)
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": BASE + "/"})
     with urllib.request.urlopen(req, timeout=300) as r, open(path, "wb") as f:
@@ -612,7 +998,7 @@ def download(url, prompt, idx, kind="image"):
 
 # ---------- 单条处理 ----------
 
-def process_image_item(prompt, body, seed, cookie, cfg, args):
+def process_image_item(prompt, body, seed, cookie, cfg, args, job_hash_value=""):
     max_retries = cfg.get("max_retries", 2)
     send_body = body
     if body["images"]:
@@ -634,7 +1020,8 @@ def process_image_item(prompt, body, seed, cookie, cfg, args):
                 return {"ok": False, "files": [], "fatal": False, "note": "FAILED 无图片URL"}
             files = []
             for i, u in enumerate(urls):
-                fn, path, src = download(u, prompt, i, "image")
+                fn, path, src = download(u, prompt, i, "image", model=body["model"],
+                                         template=args.name_template, job_hash_value=job_hash_value)
                 files.append(fn)
                 if not args.no_sidecar:
                     src_disp = f"data:inline({len(src)} chars)" if src.startswith("data:") else src
@@ -679,7 +1066,7 @@ def process_image_item(prompt, body, seed, cookie, cfg, args):
     return {"ok": False, "files": [], "fatal": False, "note": "FAILED（保留重试）"}
 
 
-def process_video_item(prompt, body, mode, model, cookie, cfg, args):
+def process_video_item(prompt, body, mode, model, cookie, cfg, args, job_hash_value=""):
     meta = VIDEO_MODELS.get(model, {})
     send_body = dict(body)
     try:
@@ -721,7 +1108,8 @@ def process_video_item(prompt, body, mode, model, cookie, cfg, args):
     if not video_url:
         log(f"  返回里没有 videoUrl：{json.dumps(payload, ensure_ascii=False)[:300]}")
         return {"ok": False, "files": [], "fatal": False, "note": "FAILED 无videoUrl"}
-    fn, path, src = download(video_url, prompt, 0, "video")
+    fn, path, src = download(video_url, prompt, 0, "video", model=model,
+                             template=args.name_template, job_hash_value=job_hash_value)
     if not args.no_sidecar:
         src_disp = f"data:inline({len(src)} chars)" if src.startswith("data:") else src
         write_sidecar(path, {
@@ -789,8 +1177,16 @@ def parse_args(argv):
     p.add_argument("-n", "--limit", dest="limit_flag", type=int, default=None, help="同上，flag 形式")
     p.add_argument("--check", action="store_true", help="只做开跑前预检")
     p.add_argument("--dry-run", action="store_true", help="解析并展示将要生成什么，不调用 API")
+    p.add_argument("--validate", action="store_true", help="校验队列，不调用 API")
+    p.add_argument("--estimate", action="store_true", help="估算队列成本，不调用 API")
+    p.add_argument("--summary", action="store_true", help="汇总 results.jsonl")
+    p.add_argument("--retry-failed", action="store_true", help="把 failed.jsonl 里的任务追加回 prompts.txt")
     p.add_argument("--list-models", action="store_true", help="列出平台所有可用模型（在线）")
+    p.add_argument("--json", action="store_true", help="让 validate/estimate/summary 输出 JSON")
     p.add_argument("--no-sidecar", action="store_true", help="不写 .json 边车")
+    p.add_argument("--no-cache", action="store_true", help="忽略 results.jsonl 中已有成功记录，强制重新生成")
+    p.add_argument("--name-template", default=None,
+                   help="输出文件名模板，如 '{model}_{date}_{index}_{hash}.{ext}'")
     p.add_argument("--model")
     p.add_argument("--style", help="风格预设：cartoon/anime/oil/lineart/vector/pixel/lego/riso/realistic/puppet/emoji（或中文名）")
     p.add_argument("--aspect", dest="aspectRatio")
@@ -799,6 +1195,8 @@ def parse_args(argv):
     p.add_argument("--batch", dest="batch_size", type=int)
     p.add_argument("--config")
     p.add_argument("--prompts")
+    p.add_argument("--results-file", dest="results_file", help="结构化 JSONL 结果文件（默认 results.jsonl）")
+    p.add_argument("--failed-file", dest="failed_file", help="失败 JSONL 文件（默认 failed.jsonl）")
     p.add_argument("--images-dir", dest="images_dir")
     return p.parse_args(argv)
 
@@ -813,6 +1211,10 @@ def main(argv=None):
         PATHS["config"] = os.path.abspath(args.config)
     if args.prompts:
         PATHS["prompts"] = os.path.abspath(args.prompts)
+    if args.results_file:
+        PATHS["results"] = os.path.abspath(args.results_file)
+    if args.failed_file:
+        PATHS["failed"] = os.path.abspath(args.failed_file)
     if args.images_dir:
         PATHS["images"] = os.path.abspath(args.images_dir)
 
@@ -827,6 +1229,15 @@ def main(argv=None):
 
     cookie = load_cookie()
     cli = {k: getattr(args, k) for k in ("model", "style", "aspectRatio", "width", "height", "batch_size")}
+
+    if args.summary:
+        return summarize_results(as_json=args.json)
+    if args.retry_failed:
+        return retry_failed()
+    if args.validate:
+        return validate_queue(cfg, cli, as_json=args.json)
+    if args.estimate:
+        return estimate_queue(cfg, cli, as_json=args.json)
 
     ok = preflight(cfg, cli, cookie, need_network=not args.dry_run)
     if args.check:
@@ -865,21 +1276,89 @@ def main(argv=None):
 
     log(f"开始：待处理 {len(pending)} 条")
     done_indices = set()
+    cache = {} if args.no_cache else successful_cache()
 
     for n, (line_idx, raw) in enumerate(pending, 1):
         prompt, overrides = parse_prompt_line(raw)
         model = resolve_model(overrides, cli, cfg)
+        try:
+            analyzed_record, _, _ = analyze_prompt(raw, cfg, cli)
+            current_hash = analyzed_record["job_hash"]
+        except Exception:
+            current_hash = ""
+        if current_hash and current_hash in cache:
+            cached = cache[current_hash]
+            files = cached.get("files", [])
+            log(f"[{n}/{len(pending)}] ♻️ 命中缓存：{prompt[:50]} -> {', '.join(files) or '已有成功记录'}")
+            append_done(prompt, files, note="CACHED")
+            done_indices.add(line_idx)
+            cached_record = dict(cached)
+            cached_record.update({
+                "status": "cached",
+                "raw": raw,
+                "prompt": prompt,
+                "files": files,
+                "cached_from": cached.get("timestamp"),
+                "job_hash": current_hash,
+                "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+            })
+            append_result(cached_record)
+            if n < len(pending):
+                time.sleep(cfg.get("delay_between_seconds", 5))
+            continue
         if is_video_model(model):
             body, mode = build_video_body(prompt, model, cfg, overrides, cli)
             log(f"[{n}/{len(pending)}] 🎬 {prompt[:50]} ({model} / {mode})")
-            res = process_video_item(prompt, body, mode, model, cookie, cfg, args)
+            res = process_video_item(prompt, body, mode, model, cookie, cfg, args, current_hash)
+            result_record = {
+                "prompt": prompt,
+                "raw": raw,
+                "type": "video",
+                "model": model,
+                "mode": mode,
+                "cost_estimate": VIDEO_MODELS.get(model, {}).get("cost"),
+                "params": {
+                    "width": body.get("width"),
+                    "height": body.get("height"),
+                    "aspectRatio": body.get("aspectRatio"),
+                    "videoSeconds": body.get("videoSeconds"),
+                    "resolution": body.get("resolution"),
+                    "source_image": body.get("image"),
+                    "reference_images": body.get("referenceImages", []),
+                },
+            }
         else:
             body, seed = build_body(prompt, cfg, overrides, cli)
             log(f"[{n}/{len(pending)}] 🖼️ {prompt[:50]} "
                 f"({model} {body['width']}x{body['height']} x{body['batch_size']} seed={seed})")
-            res = process_image_item(prompt, body, seed, cookie, cfg, args)
+            res = process_image_item(prompt, body, seed, cookie, cfg, args, current_hash)
+            result_record = {
+                "prompt": prompt,
+                "raw": raw,
+                "type": "image",
+                "model": model,
+                "cost_estimate": IMAGE_MODELS.get(model, {}).get("cost"),
+                "params": {
+                    "width": body.get("width"),
+                    "height": body.get("height"),
+                    "aspectRatio": body.get("aspectRatio"),
+                    "batch_size": body.get("batch_size"),
+                    "seed": seed,
+                    "reference_images": body.get("images", []),
+                    "negative_prompt": body.get("negative_prompt", ""),
+                },
+            }
+        if current_hash:
+            result_record["job_hash"] = current_hash
 
         if res["fatal"]:
+            result_record.update({
+                "status": "fatal",
+                "files": res.get("files", []),
+                "error": res.get("note", ""),
+            })
+            append_result(result_record)
+            append_failed(result_record)
             remove_lines(done_indices)
             log("已终止本次（致命错误：见上）。失败项保留在 prompts.txt。")
             return 1
@@ -888,11 +1367,22 @@ def main(argv=None):
             done_indices.add(line_idx)
         else:
             append_done(prompt, [], note=res["note"])
+        result_record.update({
+            "status": "success" if res["ok"] else "failed",
+            "files": res.get("files", []),
+            "error": "" if res["ok"] else res.get("note", ""),
+        })
+        append_result(result_record)
+        if res["ok"] and current_hash:
+            cache[current_hash] = result_record
+        if not res["ok"]:
+            append_failed(result_record)
         if n < len(pending):
             time.sleep(cfg.get("delay_between_seconds", 5))
 
     remove_lines(done_indices)
-    log(f"完成：成功 {len(done_indices)}/{len(pending)} 条。结果在 images/，记录在 done.txt。")
+    results_label = os.path.relpath(PATHS["results"], HERE)
+    log(f"完成：成功 {len(done_indices)}/{len(pending)} 条。结果在 images/，记录在 done.txt 和 {results_label}。")
     return 0
 
 

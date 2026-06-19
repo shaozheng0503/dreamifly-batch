@@ -1,0 +1,8 @@
+# 每行一个 prompt。脚本会从上往下逐条生成。
+# 以 # 开头的行和空行会被忽略。
+# 处理完的会被移动到 done.txt，结构化结果会写入 results.jsonl。
+# 复制为 prompts.txt 后，把下面示例替换成你的真实提示词。
+
+a cyberpunk city street in the rain, neon reflections, cinematic | model=Z-Image-Turbo
+masterpiece, 1girl, sakura, soft light | model=Wai-SDXL-V150 | 1:1
+edit this, add snow to the scene | model=Qwen-Image-Edit | img=ref.png
