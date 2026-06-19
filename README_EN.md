@@ -34,6 +34,14 @@ pre-flight check, and multi-model routing — write prompts into `prompts.txt`, 
 
 ▶️ [Full video sample-t2v-city-sunset.mp4](./docs/sample-t2v-city-sunset.mp4) (1280×720 · h264 · 5s)
 
+**Image-to-video** (Wan2.2-I2V-Lightning · the garden image above + `gentle wind, koi swimming, falling leaves` · real output)
+
+| Source (input) | Generated video (output) |
+|---|---|
+| ![ref](./docs/sample-japanese-garden.png) | ![i2v](./docs/sample-i2v-garden.gif) |
+
+▶️ [Full video sample-i2v-garden.mp4](./docs/sample-i2v-garden.mp4) (1280×720 · h264)
+
 ## Models
 
 Run `python3 dreamify.py --list-models` for the live list.
