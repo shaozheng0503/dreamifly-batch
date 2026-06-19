@@ -1,32 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Dreamifly 批量生图脚本
+Dreamifly 批量生图 / 生视频脚本
 - 从 prompts.txt 读取提示词（每行一个，# 开头/空行忽略）
-- 调用 https://dreamifly.com/api/generate 生成图片
-- 把返回的图片下载到 images/，成功的 prompt 移到 done.txt
-- 每张图旁边写一个 .json 边车文件，记录 seed/参数，便于复现
+- 生图：调用 https://dreamifly.com/api/generate
+- 生视频：调用 https://dreamifly.com/api/generate-video（同步返回 videoUrl）
+- 把结果下载到 images/，每个文件旁写 .json 边车（记录 seed/模型/参数），成功的 prompt 移到 done.txt
+
+支持的模型（见 --list-models 获取在线最新列表）：
+  生图：Wai-SDXL-V150 / Wai-SDXL-V170 / Z-Image-Turbo / Qwen-Image-Edit / gpt-image-2 / nano-banana-2
+  视频：Wan2.2-I2V-Lightning（图生视频）/ happyhorse-1.0（文/图/多参考图生视频）
 
 鉴权：
 - Authorization: Bearer MD5(apiKey + 服务器时间串)   —— 自动从 /api/time 取时间，自己算
-- Cookie: 你的登录态                                  —— 读 config/cookie.txt（gpt-image-2 必须登录）
+- Cookie: 你的登录态                                  —— 读 config/cookie.txt（部分模型/视频必须登录）
 
 提示词内联参数（用 | 分隔，可任意组合，覆盖 config.json）：
-    a cat on the moon | 16:9 | x2 | seed=123 | model=gpt-image-2 | 1024x768 | neg=blurry
-    - 16:9        宽高比 aspectRatio
-    - x2          本条生成 2 张 (batch_size)
-    - 1024x768    宽x高
-    - seed=123    固定随机种子
-    - model=...   覆盖模型
-    - neg=...     负向提示词
-    - img=URL     参考图（图生图，实验性，可逗号分隔多张）
+    a cat | model=Wai-SDXL-V150 | 16:9 | x2 | seed=123 | 1024x768 | neg=blurry | img=ref.png
+    生视频示例：
+    a cat running | model=Wan2.2-I2V-Lightning | img=source.png            （图生视频，需 1 张源图）
+    a sunset timelapse | model=happyhorse-1.0 | secs=5 | res=720P          （文生视频）
+    - model=...   选择模型（生图或视频）
+    - 16:9 / 1024x768 / x2 / seed= / neg=   生图参数
+    - img=路径或URL（逗号分隔）   参考图/源图，自动转 base64
+    - secs=N      视频时长秒（happyhorse 3-15）
+    - res=720P    视频分辨率（happyhorse：720P / 1080P）
 
 常用命令：
-    python3 dreamify.py            # 跑完 prompts.txt 全部
-    python3 dreamify.py 3          # 只跑前 3 条
-    python3 dreamify.py --check    # 只做开跑前预检，不生成
-    python3 dreamify.py --dry-run  # 解析并展示将要生成什么，不调用 API
-    python3 dreamify.py --aspect 16:9 --batch 2   # 全局覆盖参数
+    python3 dreamify.py                 # 跑完队列全部
+    python3 dreamify.py 3               # 只跑前 3 条
+    python3 dreamify.py --check         # 只做开跑前预检
+    python3 dreamify.py --dry-run       # 解析并展示将要生成什么，不调用 API
+    python3 dreamify.py --list-models   # 列出平台所有可用模型（在线）
 """
 
 import argparse
@@ -41,33 +46,51 @@ import datetime
 import urllib.request
 import urllib.error
 
-# 前端限制：单张参考图 ≤ 10MB（0xa00000）
-MAX_IMAGE_BYTES = 10 * 1024 * 1024
-
 BASE = "https://dreamifly.com"
 # NEXT_PUBLIC_API_KEY —— 这是打进前端、发给每个浏览器的公开标识，非私密凭证
 API_KEY = "6h^&+h4567mk&&9-%@"
 UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 "
       "(KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1")
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-PROMPTS_FILE = os.path.join(HERE, "prompts.txt")
-DONE_FILE = os.path.join(HERE, "done.txt")
-IMAGES_DIR = os.path.join(HERE, "images")
-CONFIG_FILE = os.path.join(HERE, "config", "config.json")
-COOKIE_FILE = os.path.join(HERE, "config", "cookie.txt")
-LOG_FILE = os.path.join(HERE, "run.log")
+# 前端限制：单张参考图 ≤ 10MB（0xa00000）
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+VIDEO_EXTS = (".mp4", ".webm", ".mov", ".m4v", ".gif")
 
-# 可被命令行覆盖的运行期路径（main 里按 args 重设）
-PATHS = {
-    "prompts": PROMPTS_FILE,
-    "done": DONE_FILE,
-    "images": IMAGES_DIR,
-    "config": CONFIG_FILE,
-    "cookie": COOKIE_FILE,
+# 已知模型注册表（离线兜底；--list-models 会拉取在线最新）。
+# 成本为大致值，最终以平台扣费为准。
+# steps：部分模型（Wai/Z）必须传指定步数，否则 400；其余传 None（不发）。
+IMAGE_MODELS = {
+    "Wai-SDXL-V150":   {"t2i": True,  "i2i": False, "max_images": 0, "login": False, "steps": 20,   "cost": "~0.1",   "tags": "动漫风格"},
+    "Wai-SDXL-V170":   {"t2i": True,  "i2i": False, "max_images": 0, "login": False, "steps": 20,   "cost": "~0.1",   "tags": "动漫风格"},
+    "Z-Image-Turbo":   {"t2i": True,  "i2i": False, "max_images": 0, "login": False, "steps": 10,   "cost": "~0.325", "tags": "中文/快"},
+    "Qwen-Image-Edit": {"t2i": False, "i2i": True,  "max_images": 3, "login": False, "steps": None, "cost": "~1.2",   "tags": "图生图/中文"},
+    "gpt-image-2":     {"t2i": True,  "i2i": True,  "max_images": 3, "login": True,  "steps": None, "cost": "顶级",    "tags": "文/图生图·中文"},
+    "nano-banana-2":   {"t2i": True,  "i2i": True,  "max_images": 3, "login": True,  "steps": None, "cost": "~25+",   "tags": "文/图生图·中文"},
+}
+VIDEO_MODELS = {
+    "Wan2.2-I2V-Lightning": {
+        "provider": "comfy", "mode": "image-to-video", "needs_image": True,
+        "use_seconds": False, "use_resolution": False, "cost": "~200", "tags": "图生视频/快",
+    },
+    "happyhorse-1.0": {
+        "provider": "happyhorse", "mode": "text-to-video", "needs_image": False,
+        "use_seconds": True, "default_seconds": 5, "min_seconds": 3, "max_seconds": 15,
+        "use_resolution": True, "resolutions": ["720P", "1080P"], "default_resolution": "720P",
+        "max_reference_images": 9, "cost": "~150+", "tags": "文/图/多参考图生视频",
+    },
 }
 
-# config.json 字段校验规则：键 -> (类型, 校验函数 或 None)
+HERE = os.path.dirname(os.path.abspath(__file__))
+PATHS = {
+    "prompts": os.path.join(HERE, "prompts.txt"),
+    "done": os.path.join(HERE, "done.txt"),
+    "images": os.path.join(HERE, "images"),
+    "config": os.path.join(HERE, "config", "config.json"),
+    "cookie": os.path.join(HERE, "config", "cookie.txt"),
+}
+LOG_FILE = os.path.join(HERE, "run.log")
+
 CONFIG_SCHEMA = {
     "model": (str, lambda v: len(v) > 0),
     "width": (int, lambda v: 64 <= v <= 4096),
@@ -77,6 +100,9 @@ CONFIG_SCHEMA = {
     "delay_between_seconds": ((int, float), lambda v: v >= 0),
     "max_retries": (int, lambda v: 0 <= v <= 10),
     "request_timeout_seconds": ((int, float), lambda v: v > 0),
+    "video_seconds": (int, lambda v: 1 <= v <= 60),
+    "video_resolution": (str, lambda v: str(v).upper() in ("720P", "1080P")),
+    "video_timeout_seconds": ((int, float), lambda v: v > 0),
 }
 
 
@@ -90,17 +116,17 @@ def log(msg):
         pass
 
 
+# ---------- 配置 / cookie ----------
+
 def load_config():
     with open(PATHS["config"], encoding="utf-8") as f:
         return json.load(f)
 
 
 def validate_config(cfg):
-    """返回问题列表（空列表表示通过）。"""
     issues = []
     for key, (types, check) in CONFIG_SCHEMA.items():
         if key not in cfg or cfg[key] is None:
-            # 这些有默认值，缺省可接受；只对明显必需的提示
             if key in ("model", "width", "height"):
                 issues.append(f"config 缺少必需字段：{key}")
             continue
@@ -117,17 +143,16 @@ def load_cookie():
     path = PATHS["cookie"]
     if not os.path.exists(path):
         return ""
-    val = ""
     for ln in open(path, encoding="utf-8"):
         s = ln.strip()
         if s and not s.startswith("#"):
-            val = s
-            break
-    return val
+            return s
+    return ""
 
+
+# ---------- 鉴权 ----------
 
 def get_server_timestring():
-    """拿服务器时间串（YYYYMMDDHHMM）；失败则回退本地 UTC。"""
     try:
         req = urllib.request.Request(
             f"{BASE}/api/time",
@@ -144,15 +169,72 @@ def get_server_timestring():
 
 
 def make_token():
-    salt = get_server_timestring()
-    return hashlib.md5((API_KEY + salt).encode("utf-8")).hexdigest()
+    return hashlib.md5((API_KEY + get_server_timestring()).encode("utf-8")).hexdigest()
 
+
+def base_headers(model):
+    h = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {make_token()}",
+        "User-Agent": UA,
+        "Referer": f"{BASE}/create?model={model}",
+        "Origin": BASE,
+    }
+    return h
+
+
+# ---------- 模型 ----------
+
+def canonical_model(name):
+    """大小写不敏感地把用户输入归一到注册表里的标准 id。"""
+    if not name:
+        return name
+    for k in list(IMAGE_MODELS) + list(VIDEO_MODELS):
+        if k.lower() == name.lower():
+            return k
+    return name
+
+
+def is_video_model(model):
+    return model in VIDEO_MODELS
+
+
+def resolve_model(overrides, cli, cfg):
+    name = overrides.get("model") or cli.get("model") or cfg.get("model", "gpt-image-2")
+    return canonical_model(name)
+
+
+def list_models():
+    def fetch(path):
+        req = urllib.request.Request(BASE + path, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read().decode()).get("models", [])
+    try:
+        ims, vms = fetch("/api/models"), fetch("/api/video-models")
+        print("AI 生图模型（/api/generate）：")
+        for m in ims:
+            caps = ([("文生图" if m.get("use_t2i") else None),
+                     ("图生图" if m.get("use_i2i") else None)])
+            caps = "/".join(c for c in caps if c)
+            print(f"  {m.get('id',''):24} {caps:10} maxImg={m.get('maxImages',0)} "
+                  f"login={bool(m.get('requiresLogin'))}  {m.get('description','')[:30]}")
+        print("\nAI 视频模型（/api/generate-video）：")
+        for m in vms:
+            print(f"  {m.get('id',''):24} {m.get('mode',''):16} tags={','.join(m.get('tags',[]))}")
+        return 0
+    except Exception as e:
+        print(f"在线获取失败（{e}），内置已知模型：")
+        for k, v in IMAGE_MODELS.items():
+            print(f"  [图] {k:24} t2i={v['t2i']} i2i={v['i2i']} cost={v['cost']}")
+        for k, v in VIDEO_MODELS.items():
+            print(f"  [视频] {k:24} {v['tags']} cost={v['cost']}")
+        return 1
+
+
+# ---------- 提示词队列 ----------
 
 def parse_prompt_line(line):
-    """把一行提示词拆成 (干净提示词, 覆盖项 dict)。
-    语法：提示词 | 16:9 | x2 | 1024x768 | seed=123 | model=... | neg=... | img=URL,URL
-    无法识别的片段会被忽略（并提示）。
-    """
+    """把一行拆成 (干净提示词, 覆盖项 dict)。"""
     parts = [p.strip() for p in line.split("|")]
     prompt = parts[0].strip()
     overrides = {}
@@ -176,6 +258,18 @@ def parse_prompt_line(line):
             overrides["model"] = seg.split("=", 1)[1].strip()
         elif low.startswith(("neg=", "negative=")):
             overrides["negative_prompt"] = seg.split("=", 1)[1].strip()
+        elif low.startswith("steps="):
+            try:
+                overrides["steps"] = int(seg.split("=", 1)[1])
+            except ValueError:
+                log(f"  ⚠️ 无法解析 steps：{seg}")
+        elif low.startswith(("secs=", "seconds=")):
+            try:
+                overrides["seconds"] = int(seg.split("=", 1)[1])
+            except ValueError:
+                log(f"  ⚠️ 无法解析 secs：{seg}")
+        elif low.startswith(("res=", "resolution=")):
+            overrides["resolution"] = seg.split("=", 1)[1].strip()
         elif low.startswith("img="):
             urls = [u.strip() for u in seg.split("=", 1)[1].split(",") if u.strip()]
             overrides["images"] = urls
@@ -185,20 +279,15 @@ def parse_prompt_line(line):
 
 
 def read_prompt_queue():
-    """返回 (所有行, [(行索引, 原始行)] 待处理列表)。"""
     if not os.path.exists(PATHS["prompts"]):
         return [], []
     lines = open(PATHS["prompts"], encoding="utf-8").read().splitlines()
-    pending = []
-    for i, ln in enumerate(lines):
-        s = ln.strip()
-        if s and not s.startswith("#"):
-            pending.append((i, s))
+    pending = [(i, ln.strip()) for i, ln in enumerate(lines)
+               if ln.strip() and not ln.strip().startswith("#")]
     return lines, pending
 
 
 def remove_lines(done_indices):
-    """从 prompts.txt 删除已成功的行，其余（含注释）原样保留。"""
     lines = open(PATHS["prompts"], encoding="utf-8").read().splitlines()
     kept = [ln for i, ln in enumerate(lines) if i not in done_indices]
     with open(PATHS["prompts"], "w", encoding="utf-8") as f:
@@ -212,13 +301,14 @@ def append_done(prompt, filenames, note=""):
 
 
 def slugify(text, maxlen=40):
-    text = re.sub(r"[一-龥]+", lambda m: m.group(0), text)
     text = re.sub(r"[^\w一-龥]+", "_", text).strip("_")
-    return (text[:maxlen] or "image")
+    return (text[:maxlen] or "media")
 
+
+# ---------- 请求体 ----------
 
 def build_body(prompt, cfg, overrides=None, cli=None):
-    """构造请求体并返回 (body, seed)。优先级：内联 > 命令行 > config。"""
+    """生图请求体，返回 (body, seed)。优先级：内联 > 命令行 > config。"""
     overrides = overrides or {}
     cli = cli or {}
 
@@ -233,17 +323,21 @@ def build_body(prompt, cfg, overrides=None, cli=None):
     if seed is None:
         seed = int.from_bytes(os.urandom(4), "big") % 100000000
 
+    model = canonical_model(pick("model", "gpt-image-2"))
     body = {
         "prompt": prompt,
         "width": pick("width", 1024),
         "height": pick("height", 1024),
         "seed": seed,
         "batch_size": pick("batch_size", 1),
-        "model": pick("model", "gpt-image-2"),
+        "model": model,
         "images": overrides.get("images", []),
         "aspectRatio": pick("aspectRatio", "1:1"),
     }
+    # steps：内联/cli/config 优先，否则用模型注册表默认（Wai 必须 20/30，Z-Image-Turbo 10/20）
     steps = pick("steps", None)
+    if steps is None:
+        steps = IMAGE_MODELS.get(model, {}).get("steps")
     if steps:
         body["steps"] = steps
     neg = pick("negative_prompt", "")
@@ -252,28 +346,79 @@ def build_body(prompt, cfg, overrides=None, cli=None):
     return body, seed
 
 
-def post_generate(body, cookie):
-    token = make_token()
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {token}",
-        "User-Agent": UA,
-        "Referer": f"{BASE}/create?model={body.get('model')}",
-        "Origin": BASE,
+def build_video_body(prompt, model, cfg, overrides=None, cli=None):
+    """生视频请求体，返回 (body, mode)。body 里 image/referenceImages 仍是原始引用，发送前再编码。"""
+    overrides = overrides or {}
+    cli = cli or {}
+    meta = VIDEO_MODELS.get(model, {})
+    imgs = overrides.get("images", [])
+
+    # 推导 videoMode（comfy 类如 Wan 固定为其自身 mode）
+    if meta.get("provider") == "comfy":
+        mode = meta.get("mode", "image-to-video")
+    elif len(imgs) > 1:
+        mode = "reference-to-video"
+    elif len(imgs) == 1:
+        mode = "image-to-video"
+    else:
+        mode = "text-to-video"
+
+    def pick(key, cfgkey, default):
+        if key in overrides:
+            return overrides[key]
+        if cli.get(key) is not None:
+            return cli[key]
+        return cfg.get(cfgkey, default)
+
+    body = {
+        "prompt": prompt,
+        "negative_prompt": (overrides.get("negative_prompt") or "").strip(),
+        "width": pick("width", "video_width", 1280),
+        "height": pick("height", "video_height", 720),
+        "aspectRatio": pick("aspectRatio", "video_aspectRatio", "16:9"),
+        "model": model,
+        "videoMode": mode,
     }
+
+    if meta.get("use_seconds"):
+        secs = overrides.get("seconds", cfg.get("video_seconds", meta.get("default_seconds", 5)))
+        secs = max(meta.get("min_seconds", 3), min(meta.get("max_seconds", 15), int(secs)))
+        body["videoSeconds"] = secs
+    if meta.get("use_resolution"):
+        res = str(overrides.get("resolution", cfg.get("video_resolution", meta.get("default_resolution", "720P")))).upper()
+        if not res.endswith("P"):
+            res += "P"
+        body["resolution"] = res
+
+    # 源图 / 参考图（保留原始引用，发送前编码）
+    if mode in ("image-to-video",) and imgs:
+        body["image"] = imgs[0]
+    elif mode == "reference-to-video":
+        body["referenceImages"] = imgs[:meta.get("max_reference_images", 9)]
+    return body, mode
+
+
+# ---------- 网络 ----------
+
+def post_generate(body, cookie):
+    headers = base_headers(body.get("model"))
     if cookie:
         headers["Cookie"] = cookie
-    req = urllib.request.Request(
-        f"{BASE}/api/generate",
-        data=json.dumps(body).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
-    return req
+    return urllib.request.Request(f"{BASE}/api/generate",
+                                  data=json.dumps(body).encode("utf-8"),
+                                  headers=headers, method="POST")
+
+
+def post_generate_video(body, cookie):
+    headers = base_headers(body.get("model"))
+    if cookie:
+        headers["Cookie"] = cookie
+    return urllib.request.Request(f"{BASE}/api/generate-video",
+                                  data=json.dumps(body).encode("utf-8"),
+                                  headers=headers, method="POST")
 
 
 def extract_image_urls(payload):
-    """从返回里挖出图片 URL（兼容 imageUrl / images[] 等形态）。"""
     urls = []
     if isinstance(payload, dict):
         for k in ("imageUrl", "url", "image"):
@@ -289,7 +434,6 @@ def extract_image_urls(payload):
                         for kk in ("imageUrl", "url", "image"):
                             if isinstance(x.get(kk), str):
                                 urls.append(x[kk])
-    # 去重保序
     seen, out = set(), []
     for u in urls:
         if u not in seen:
@@ -298,9 +442,7 @@ def extract_image_urls(payload):
 
 
 def encode_reference_image(ref):
-    """把参考图统一转成 API 要求的「无前缀 base64 字符串」。
-    支持：本地文件路径 / http(s) URL / data:URI。
-    """
+    """把参考图/源图统一转成 API 要求的「无前缀 base64 字符串」。支持本地路径 / http(s) URL / data:URI。"""
     if ref.startswith("data:"):
         return ref.split(",", 1)[1]
     if ref.startswith(("http://", "https://", "//")):
@@ -319,9 +461,8 @@ def encode_reference_image(ref):
     return base64.b64encode(data).decode("ascii")
 
 
-def write_sidecar(image_path, meta):
-    """在图片旁写 <name>.json 记录生成参数，便于复现。"""
-    side = os.path.splitext(image_path)[0] + ".json"
+def write_sidecar(media_path, meta):
+    side = os.path.splitext(media_path)[0] + ".json"
     try:
         with open(side, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -329,55 +470,180 @@ def write_sidecar(image_path, meta):
         log(f"  ⚠️ 写 metadata 边车失败：{e}")
 
 
-def download(url, prompt, idx):
+def download(url, prompt, idx, kind="image"):
     if url.startswith("//"):
         url = "https:" + url
     elif url.startswith("/"):
         url = BASE + url
+    allowed = VIDEO_EXTS if kind == "video" else IMG_EXTS
+    default = ".mp4" if kind == "video" else ".png"
     ext = os.path.splitext(url.split("?")[0])[1].lower()
-    if ext not in (".png", ".jpg", ".jpeg", ".webp"):
-        ext = ".png"
+    if ext not in allowed:
+        ext = default
     fn = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{slugify(prompt)}_{idx}{ext}"
     path = os.path.join(PATHS["images"], fn)
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": BASE + "/"})
-    with urllib.request.urlopen(req, timeout=120) as r, open(path, "wb") as f:
+    with urllib.request.urlopen(req, timeout=300) as r, open(path, "wb") as f:
         f.write(r.read())
     return fn, path, url
 
 
-def preflight(cfg, cookie, need_network=True):
-    """开跑前预检：配置/提示词/cookie/连通性。返回 (能否继续, 是否有警告)。"""
+# ---------- 单条处理 ----------
+
+def process_image_item(prompt, body, seed, cookie, cfg, args):
+    max_retries = cfg.get("max_retries", 2)
+    send_body = body
+    if body["images"]:
+        try:
+            send_body = dict(body)
+            send_body["images"] = [encode_reference_image(x) for x in body["images"]]
+            log(f"  🖼️ 已编码 {len(send_body['images'])} 张参考图（图生图）")
+        except Exception as e:
+            return {"ok": False, "files": [], "fatal": False, "note": f"FAILED 参考图错误：{e}"}
+
+    for attempt in range(max_retries + 1):
+        try:
+            req = post_generate(send_body, cookie)
+            with urllib.request.urlopen(req, timeout=cfg.get("request_timeout_seconds", 300)) as r:
+                payload = json.loads(r.read().decode())
+            urls = extract_image_urls(payload)
+            if not urls:
+                log(f"  返回里没找到图片 URL：{json.dumps(payload, ensure_ascii=False)[:300]}")
+                return {"ok": False, "files": [], "fatal": False, "note": "FAILED 无图片URL"}
+            files = []
+            for i, u in enumerate(urls):
+                fn, path, src = download(u, prompt, i, "image")
+                files.append(fn)
+                if not args.no_sidecar:
+                    src_disp = f"data:inline({len(src)} chars)" if src.startswith("data:") else src
+                    write_sidecar(path, {
+                        "type": "image", "prompt": prompt, "model": body["model"],
+                        "width": body["width"], "height": body["height"],
+                        "aspectRatio": body["aspectRatio"], "seed": seed, "batch_index": i,
+                        "source_url": src_disp, "reference_images": body["images"],
+                        "negative_prompt": body.get("negative_prompt", ""),
+                        "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                    })
+            log(f"  ✅ 下载 {len(files)} 张：{', '.join(files)}")
+            return {"ok": True, "files": files, "fatal": False, "note": ""}
+        except urllib.error.HTTPError as e:
+            err = ""
+            try:
+                err = e.read().decode()[:400]
+            except Exception:
+                pass
+            log(f"  HTTP {e.code}: {err}")
+            if e.code == 401:
+                log("  ❌ 未登录/登录失效 —— 请更新 config/cookie.txt 后重跑。")
+                return {"ok": False, "files": [], "fatal": True, "note": "401"}
+            if e.code == 402:
+                log("  ❌ 账号积分不足 —— 终止本次。")
+                return {"ok": False, "files": [], "fatal": True, "note": "402"}
+            if e.code == 429:
+                wait = 30 * (attempt + 1)
+                log(f"  限流，等待 {wait}s 重试…")
+                time.sleep(wait)
+                continue
+            if 500 <= e.code < 600 and attempt < max_retries:
+                time.sleep(5)
+                continue
+            return {"ok": False, "files": [], "fatal": False, "note": f"FAILED HTTP{e.code}"}
+        except Exception as e:
+            log(f"  请求异常（第 {attempt+1} 次）：{e}")
+            if attempt < max_retries:
+                time.sleep(5)
+                continue
+            return {"ok": False, "files": [], "fatal": False, "note": f"FAILED {e}"}
+    return {"ok": False, "files": [], "fatal": False, "note": "FAILED（保留重试）"}
+
+
+def process_video_item(prompt, body, mode, model, cookie, cfg, args):
+    meta = VIDEO_MODELS.get(model, {})
+    send_body = dict(body)
+    try:
+        if send_body.get("image"):
+            send_body["image"] = encode_reference_image(send_body["image"])
+        if send_body.get("referenceImages"):
+            send_body["referenceImages"] = [encode_reference_image(x) for x in send_body["referenceImages"]]
+    except Exception as e:
+        return {"ok": False, "files": [], "fatal": False, "note": f"FAILED 源图错误：{e}"}
+
+    if meta.get("needs_image") and not send_body.get("image"):
+        log(f"  ❌ {model} 需要 1 张源图（用 img=路径），本条按 {mode} 缺图，跳过。")
+        return {"ok": False, "files": [], "fatal": False, "note": "FAILED 缺源图"}
+
+    timeout = cfg.get("video_timeout_seconds", 900)
+    log(f"  ⏳ 视频生成中（{mode}，最长等 {timeout}s）…")
+    # 视频单价高，不做自动重试以免重复扣费
+    try:
+        req = post_generate_video(send_body, cookie)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            payload = json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        err = ""
+        try:
+            err = e.read().decode()[:500]
+        except Exception:
+            pass
+        log(f"  HTTP {e.code}: {err}")
+        if e.code == 401:
+            return {"ok": False, "files": [], "fatal": True, "note": "401"}
+        if e.code == 402:
+            return {"ok": False, "files": [], "fatal": True, "note": "402"}
+        return {"ok": False, "files": [], "fatal": False, "note": f"FAILED HTTP{e.code}"}
+    except Exception as e:
+        log(f"  请求异常：{e}")
+        return {"ok": False, "files": [], "fatal": False, "note": f"FAILED {e}"}
+
+    video_url = payload.get("videoUrl")
+    if not video_url:
+        log(f"  返回里没有 videoUrl：{json.dumps(payload, ensure_ascii=False)[:300]}")
+        return {"ok": False, "files": [], "fatal": False, "note": "FAILED 无videoUrl"}
+    fn, path, src = download(video_url, prompt, 0, "video")
+    if not args.no_sidecar:
+        src_disp = f"data:inline({len(src)} chars)" if src.startswith("data:") else src
+        write_sidecar(path, {
+            "type": "video", "prompt": prompt, "model": model, "videoMode": mode,
+            "videoSeconds": body.get("videoSeconds"), "resolution": body.get("resolution"),
+            "width": body["width"], "height": body["height"], "aspectRatio": body["aspectRatio"],
+            "source_image": body.get("image"), "reference_images": body.get("referenceImages"),
+            "source_url": src_disp, "cover_image": bool(payload.get("imageUrl")),
+            "media_id": payload.get("mediaId"),
+            "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        })
+    log(f"  ✅ 视频已下载：{fn}")
+    return {"ok": True, "files": [fn], "fatal": False, "note": ""}
+
+
+# ---------- 预检 / CLI ----------
+
+def preflight(cfg, cli, cookie, need_network=True):
     log("—— 预检 ——")
     fatal = False
-    warned = False
+    for it in validate_config(cfg):
+        log(f"  ❌ {it}"); fatal = True
 
-    # 1) 配置校验
-    issues = validate_config(cfg)
-    if issues:
-        for it in issues:
-            log(f"  ❌ {it}")
-        fatal = True
+    model = resolve_model({}, cli, cfg)
+    if is_video_model(model):
+        meta = VIDEO_MODELS[model]
+        log(f"  ✅ 默认模型：{model}（视频，约 {meta['cost']} 积分/次，{meta['tags']}）")
+    elif model in IMAGE_MODELS:
+        meta = IMAGE_MODELS[model]
+        log(f"  ✅ 默认模型：{model}（生图，约 {meta['cost']} 积分，{meta['tags']}）")
     else:
-        log(f"  ✅ 配置有效：{cfg.get('model')} {cfg.get('width')}x{cfg.get('height')} "
-            f"{cfg.get('aspectRatio')} x{cfg.get('batch_size', 1)}")
+        log(f"  ⚠️ 默认模型 {model} 不在已知注册表（可能是新模型）；--list-models 可查在线列表。")
 
-    # 2) 提示词队列
     _, pending = read_prompt_queue()
     if not pending:
-        log("  ❌ prompts.txt 里没有待处理的 prompt")
-        fatal = True
+        log("  ❌ prompts.txt 里没有待处理的 prompt"); fatal = True
     else:
         log(f"  ✅ 待处理提示词 {len(pending)} 条")
 
-    # 3) cookie
     if not cookie:
-        log("  ⚠️ config/cookie.txt 为空或不存在 —— gpt-image-2 需要登录态，可能 401。"
-            "（参考 config/cookie.txt.example）")
-        warned = True
+        log("  ⚠️ config/cookie.txt 为空 —— gpt-image-2/nano-banana-2/视频 需要登录态，可能 401。")
     else:
         log(f"  ✅ 已加载 cookie（{len(cookie)} 字符）")
 
-    # 4) 连通性（顺带验证能否取到服务器时间串、算 token）
     if need_network:
         try:
             req = urllib.request.Request(f"{BASE}/api/time", headers={"User-Agent": UA})
@@ -386,35 +652,28 @@ def preflight(cfg, cookie, need_network=True):
             if data.get("timeString"):
                 log(f"  ✅ 连通正常，服务器时间串 {data['timeString']}")
             else:
-                log("  ⚠️ /api/time 返回异常，token 计算可能回退本地时间")
-                warned = True
+                log("  ⚠️ /api/time 返回异常，token 可能回退本地时间")
         except Exception as e:
-            log(f"  ❌ 无法连接 {BASE}/api/time：{e}")
-            fatal = True
+            log(f"  ❌ 无法连接 {BASE}/api/time：{e}"); fatal = True
 
     log("—— 预检结束 ——")
-    return (not fatal), warned
+    return not fatal
 
 
 def parse_args(argv):
-    p = argparse.ArgumentParser(
-        prog="dreamify.py", description="Dreamifly 批量生图",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p.add_argument("limit", nargs="?", type=int, default=None,
-                   help="本次最多处理几条（位置参数，兼容 ./run.sh 3）")
-    p.add_argument("-n", "--limit", dest="limit_flag", type=int, default=None,
-                   help="同上，flag 形式；与位置参数同时给时以 flag 为准")
-    p.add_argument("--check", action="store_true", help="只做开跑前预检，不生成")
+    p = argparse.ArgumentParser(prog="dreamify.py", description="Dreamifly 批量生图/生视频",
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("limit", nargs="?", type=int, default=None, help="本次最多处理几条（兼容 ./run.sh 3）")
+    p.add_argument("-n", "--limit", dest="limit_flag", type=int, default=None, help="同上，flag 形式")
+    p.add_argument("--check", action="store_true", help="只做开跑前预检")
     p.add_argument("--dry-run", action="store_true", help="解析并展示将要生成什么，不调用 API")
-    p.add_argument("--no-sidecar", action="store_true", help="不写每张图的 .json 边车文件")
-    # 全局覆盖（低于内联参数、高于 config）
+    p.add_argument("--list-models", action="store_true", help="列出平台所有可用模型（在线）")
+    p.add_argument("--no-sidecar", action="store_true", help="不写 .json 边车")
     p.add_argument("--model")
     p.add_argument("--aspect", dest="aspectRatio")
     p.add_argument("--width", type=int)
     p.add_argument("--height", type=int)
     p.add_argument("--batch", dest="batch_size", type=int)
-    # 路径覆盖
     p.add_argument("--config")
     p.add_argument("--prompts")
     p.add_argument("--images-dir", dest="images_dir")
@@ -424,7 +683,9 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
 
-    # 应用路径覆盖
+    if args.list_models:
+        return list_models()
+
     if args.config:
         PATHS["config"] = os.path.abspath(args.config)
     if args.prompts:
@@ -437,141 +698,78 @@ def main(argv=None):
     try:
         cfg = load_config()
     except FileNotFoundError:
-        log(f"❌ 找不到配置文件：{PATHS['config']}")
-        return 2
+        log(f"❌ 找不到配置文件：{PATHS['config']}"); return 2
     except json.JSONDecodeError as e:
-        log(f"❌ 配置文件不是合法 JSON：{e}")
-        return 2
+        log(f"❌ 配置文件不是合法 JSON：{e}"); return 2
 
     cookie = load_cookie()
-
-    # CLI 全局覆盖
     cli = {k: getattr(args, k) for k in ("model", "aspectRatio", "width", "height", "batch_size")}
 
-    # 预检
-    ok, _ = preflight(cfg, cookie, need_network=not args.dry_run)
+    ok = preflight(cfg, cli, cookie, need_network=not args.dry_run)
     if args.check:
         return 0 if ok else 1
     if not ok:
         log("预检未通过，已终止。修复上述 ❌ 后重跑（或先 --check 复检）。")
         return 1
 
-    lines, pending = read_prompt_queue()
+    _, pending = read_prompt_queue()
     limit = args.limit_flag if args.limit_flag is not None else args.limit
     if limit is not None:
         pending = pending[:limit]
 
     if args.dry_run:
-        log(f"[dry-run] 将处理 {len(pending)} 条，以下是解析结果：")
+        log(f"[dry-run] 将处理 {len(pending)} 条：")
         for n, (_, raw) in enumerate(pending, 1):
             prompt, ov = parse_prompt_line(raw)
-            body, seed = build_body(prompt, cfg, ov, cli)
-            log(f"  [{n}] {prompt[:50]} -> {body['model']} {body['width']}x{body['height']} "
-                f"{body['aspectRatio']} x{body['batch_size']} seed={seed}"
-                + (f" img={len(body['images'])}张参考" if body['images'] else ""))
+            model = resolve_model(ov, cli, cfg)
+            if is_video_model(model):
+                body, mode = build_video_body(prompt, model, cfg, ov, cli)
+                extra = mode
+                if body.get("videoSeconds"):
+                    extra += f" {body['videoSeconds']}s {body.get('resolution', '')}"
+                if body.get("image"):
+                    extra += " +源图"
+                if body.get("referenceImages"):
+                    extra += f" +{len(body['referenceImages'])}参考图"
+                log(f"  [{n}] 🎬 {prompt[:38]} -> {model} [{extra}]")
+            else:
+                body, seed = build_body(prompt, cfg, ov, cli)
+                tail = f" img={len(body['images'])}" if body["images"] else ""
+                log(f"  [{n}] 🖼️ {prompt[:38]} -> {model} {body['width']}x{body['height']} "
+                    f"{body['aspectRatio']} x{body['batch_size']} seed={seed}{tail}")
         log("[dry-run] 未调用任何 API。")
         return 0
 
     log(f"开始：待处理 {len(pending)} 条")
     done_indices = set()
-    max_retries = cfg.get("max_retries", 2)
 
     for n, (line_idx, raw) in enumerate(pending, 1):
         prompt, overrides = parse_prompt_line(raw)
-        body, seed = build_body(prompt, cfg, overrides, cli)
-        log(f"[{n}/{len(pending)}] 生成中：{prompt[:60]} "
-            f"({body['model']} {body['width']}x{body['height']} x{body['batch_size']} seed={seed})")
+        model = resolve_model(overrides, cli, cfg)
+        if is_video_model(model):
+            body, mode = build_video_body(prompt, model, cfg, overrides, cli)
+            log(f"[{n}/{len(pending)}] 🎬 {prompt[:50]} ({model} / {mode})")
+            res = process_video_item(prompt, body, mode, model, cookie, cfg, args)
+        else:
+            body, seed = build_body(prompt, cfg, overrides, cli)
+            log(f"[{n}/{len(pending)}] 🖼️ {prompt[:50]} "
+                f"({model} {body['width']}x{body['height']} x{body['batch_size']} seed={seed})")
+            res = process_image_item(prompt, body, seed, cookie, cfg, args)
 
-        # 图生图：把参考图编码为无前缀 base64 后再发（body 里保留原始引用给边车记录）
-        send_body = body
-        if body["images"]:
-            try:
-                encoded = [encode_reference_image(x) for x in body["images"]]
-                send_body = dict(body)
-                send_body["images"] = encoded
-                log(f"  🖼️ 已编码 {len(encoded)} 张参考图（图生图）")
-            except Exception as e:
-                log(f"  ❌ 参考图处理失败：{e} —— 跳过本条。")
-                append_done(prompt, [], note=f"FAILED 参考图错误：{e}")
-                if n < len(pending):
-                    time.sleep(cfg.get("delay_between_seconds", 5))
-                continue
-
-        ok_item = False
-        for attempt in range(max_retries + 1):
-            try:
-                req = post_generate(send_body, cookie)
-                with urllib.request.urlopen(req, timeout=cfg.get("request_timeout_seconds", 300)) as r:
-                    payload = json.loads(r.read().decode())
-                urls = extract_image_urls(payload)
-                if not urls:
-                    log(f"  返回里没找到图片 URL：{json.dumps(payload, ensure_ascii=False)[:300]}")
-                    break
-                files = []
-                for i, u in enumerate(urls):
-                    fn, path, src = download(u, prompt, i)
-                    files.append(fn)
-                    if not args.no_sidecar:
-                        # API 可能内联返回 data:URI；别把整段 base64 写进边车
-                        src_disp = (f"data:inline({len(src)} chars)"
-                                    if src.startswith("data:") else src)
-                        write_sidecar(path, {
-                            "prompt": prompt,
-                            "model": body["model"],
-                            "width": body["width"],
-                            "height": body["height"],
-                            "aspectRatio": body["aspectRatio"],
-                            "seed": seed,
-                            "batch_index": i,
-                            "source_url": src_disp,
-                            "reference_images": body["images"],
-                            "negative_prompt": body.get("negative_prompt", ""),
-                            "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
-                        })
-                log(f"  ✅ 下载 {len(files)} 张：{', '.join(files)}")
-                append_done(prompt, files)
-                done_indices.add(line_idx)
-                ok_item = True
-                break
-            except urllib.error.HTTPError as e:
-                err_body = ""
-                try:
-                    err_body = e.read().decode()[:400]
-                except Exception:
-                    pass
-                code = e.code
-                log(f"  HTTP {code}: {err_body}")
-                if code == 401:
-                    log("  ❌ 未登录/登录失效 —— 请更新 config/cookie.txt 后重跑。终止本次。")
-                    remove_lines(done_indices)
-                    return 1
-                if code == 402:
-                    log("  ❌ 账号积分不足 —— 终止本次。")
-                    remove_lines(done_indices)
-                    return 1
-                if code == 429:
-                    wait = 30 * (attempt + 1)
-                    log(f"  限流，等待 {wait}s 重试…")
-                    time.sleep(wait)
-                    continue
-                if 500 <= code < 600 and attempt < max_retries:
-                    time.sleep(5)
-                    continue
-                break  # 其他错误不重试
-            except Exception as e:
-                log(f"  请求异常（第 {attempt+1} 次）：{e}")
-                if attempt < max_retries:
-                    time.sleep(5)
-                    continue
-                break
-        if not ok_item:
-            append_done(prompt, [], note="FAILED（保留在 prompts.txt，下次重试）")
-        # 节流
+        if res["fatal"]:
+            remove_lines(done_indices)
+            log("已终止本次（致命错误：见上）。失败项保留在 prompts.txt。")
+            return 1
+        if res["ok"]:
+            append_done(prompt, res["files"])
+            done_indices.add(line_idx)
+        else:
+            append_done(prompt, [], note=res["note"])
         if n < len(pending):
             time.sleep(cfg.get("delay_between_seconds", 5))
 
     remove_lines(done_indices)
-    log(f"完成：成功 {len(done_indices)}/{len(pending)} 条。图片在 images/，记录在 done.txt。")
+    log(f"完成：成功 {len(done_indices)}/{len(pending)} 条。结果在 images/，记录在 done.txt。")
     return 0
 
 

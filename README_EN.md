@@ -1,14 +1,18 @@
 # dreamifly-batch
 
-Batch-generate and download images from a list of prompts via the
-[dreamifly.com](https://dreamifly.com) API. Queueing, throttling, auto-retry,
-resume-on-failure, and a pre-flight check — write prompts into `prompts.txt`,
-run one command.
+Batch-generate and download **images and videos** from a list of prompts via the
+[Dreamifly](https://dreamifly.com) API. Queueing, throttling, auto-retry, resume,
+pre-flight check, and multi-model routing — write prompts into `prompts.txt`, run one command.
 
-> 🌐 中文: [README.md](./README.md)
-> 🤖 This repo is also a **[Claude Code](https://claude.com/claude-code) Skill**: drop the folder
-> into `.claude/skills/` and Claude will invoke it when you ask to "batch generate images".
-> 🐍 **Zero dependencies**: Python 3 standard library only — no `pip install`.
+| | |
+|---|---|
+| 🌐 Dreamifly | https://dreamifly.com |
+| 📦 Repo | https://github.com/shaozheng0503/dreamifly-batch |
+| 🌍 中文 | [README.md](./README.md) |
+
+> 🤖 This repo is also a **[Claude Code](https://claude.com/claude-code) Skill / Codex agent tool**: once installed,
+> just tell the AI "batch-generate these images / make a video from this picture" and it drives the tool for you.
+> 🐍 **Zero dependencies**: Python 3 standard library only.
 
 ## Example
 
@@ -16,106 +20,107 @@ run one command.
 
 | Prompt | Output |
 |---|---|
-| `a serene japanese garden at sunset, koi pond, soft golden light, ultra detailed` | ![sample](./docs/sample-japanese-garden.png) |
+| `a serene japanese garden at sunset, koi pond, soft golden light` | ![sample](./docs/sample-japanese-garden.png) |
 
-**Image-to-image** (`img=` reference, prompt `transform ... into a snowy winter scene, frozen koi pond`)
+**Image-to-image** (`img=` reference, prompt `transform ... into a snowy winter scene`)
 
-| Reference (input) | Output |
+| Reference | Output |
 |---|---|
 | ![ref](./docs/sample-japanese-garden.png) | ![i2i](./docs/sample-i2i-winter.png) |
 
-## Features
+## Models
 
-- 📝 **Queue-based**: one prompt per line in `prompts.txt`, processed top to bottom.
-- 🎚️ **Inline params**: override per line with `| 16:9 | x2 | seed=123`.
-- 🛫 **Pre-flight check**: `--check` validates config, connectivity, and cookie before burning a whole batch.
-- 🧪 **Dry run**: `--dry-run` shows what would be generated without calling the API.
-- ⬇️ **Auto download + sidecar**: images saved to `images/`, with a `.json` next to each recording seed/params for reproducibility.
-- ✅ **Resume**: successful prompts move to `done.txt`; failures stay in `prompts.txt` to retry.
-- 🔁 **Retry & backoff**: `429` backs off, `5xx` retries, `401/402` stop immediately with a reason.
-- ⏰ **Cron-friendly**: `run.sh` cd's to its own dir.
+Run `python3 dreamify.py --list-models` for the live list.
+
+**Image (`/api/generate`)**
+
+| Model | Capability | maxImg | steps | Login | ~Credits |
+|---|---|:-:|:-:|:-:|:-:|
+| `Wai-SDXL-V150` / `Wai-SDXL-V170` | text-to-image · anime | 0 | 20 | no | ~0.1 |
+| `Z-Image-Turbo` | text-to-image · CN · fast | 0 | 10 | no | ~0.325 |
+| `Qwen-Image-Edit` | image-to-image · CN | 3 | — | no | ~1.2 |
+| `gpt-image-2` | t2i + i2i · CN | 3 | — | yes | premium |
+| `nano-banana-2` | t2i + i2i · CN | 3 | — | yes | ~25+ |
+
+`steps` is auto-filled per model (Wai needs 20/30, Z-Image-Turbo 10/20).
+
+**Video (`/api/generate-video`, pricier, slower)**
+
+| Model | Modes | Params | ~Credits |
+|---|---|---|:-:|
+| `Wan2.2-I2V-Lightning` | image-to-video (**needs 1 source image**) | — | ~200 |
+| `happyhorse-1.0` | text/image/reference-to-video + edit | `secs`(3–15) `res`(720P/1080P) | ~150+ |
+
+Video mode is auto-derived: no image → text-to-video, 1 → image-to-video, many → reference-to-video.
+
+## Get your login Cookie (required for gpt-image-2 / nano-banana-2 / video)
+
+The `Authorization` token is computed automatically — the only thing **you** provide is your browser Cookie.
+
+1. Log in at https://dreamifly.com (GitHub / WeChat / etc.). Your credits show bottom-left.
+2. Open DevTools (`F12`), go to the **Network** tab.
+3. Refresh, click any request to `dreamifly.com`, find **Request Headers → `Cookie:`**, copy the whole line.
+4. `cp config/cookie.txt.example config/cookie.txt`, paste the line in (without the `Cookie:` prefix), save.
+5. Verify: `python3 dreamify.py --check` → expect `✅ cookie loaded`. Cookies expire; re-copy on a 401.
+
+⚠️ The Cookie equals your login. It is gitignored — never commit or share it.
 
 ## Quick start
 
 ```bash
 git clone https://github.com/shaozheng0503/dreamifly-batch.git
 cd dreamifly-batch
-
-# 1) Auth: copy the template and paste your dreamifly.com Cookie line
-cp config/cookie.txt.example config/cookie.txt
-#    edit config/cookie.txt, remove comments, paste your Cookie
-
-# 2) Pre-flight (recommended)
+cp config/cookie.txt.example config/cookie.txt   # fill in if using login models
+python3 dreamify.py --list-models
 python3 dreamify.py --check
-
-# 3) Add prompts, one per line
-echo "a cyberpunk city street in the rain, neon reflections, cinematic" >> prompts.txt
-
-# 4) Run (all / first 3)
+echo "anime girl with flowers | model=Wai-SDXL-V150" >> prompts.txt
 ./run.sh
-./run.sh 3
 ```
 
-> **Get the cookie**: log in to dreamifly.com → DevTools (F12) → Network → click any request
-> → copy the whole `Cookie` line from Request Headers. `gpt-image-2` requires login or you get 401.
+## Switching models
 
-## Inline prompt params
+Precedence: **inline > CLI flag > config.json**.
 
-Separate with `|` inside a single line in `prompts.txt` (overrides `config.json`):
-
+```text
+# prompts.txt — per-line model
+masterpiece, 1girl, sakura | model=Wai-SDXL-V150
+edit this, add snow        | model=Qwen-Image-Edit | img=ref.png
+a cat running              | model=Wan2.2-I2V-Lightning | img=source.png
+city timelapse             | model=happyhorse-1.0 | secs=5 | res=720P
 ```
-a neon cat on the moon | 16:9 | x2 | seed=123 | model=gpt-image-2 | 1024x768 | neg=blurry
+```bash
+python3 dreamify.py --model Z-Image-Turbo   # whole run
+# or edit "model" in config/config.json for the default
 ```
 
-| Segment | Meaning |
-|---|---|
-| `16:9` | aspect ratio |
-| `x2` | generate 2 images for this line |
-| `1024x768` | width x height |
-| `seed=123` | fixed seed (reproducible) |
-| `model=...` | override model |
-| `neg=...` | negative prompt |
-| `img=path,or,URL` | reference image(s) for image-to-image — local file / URL / data:URI, auto base64 (1–9, ≤10MB each, login required) |
+## Inline params
+
+`model=` · `16:9` · `1024x768` · `x2` (≤4) · `seed=` · `steps=` · `neg=` · `img=path,or,URL` · `secs=` · `res=720P`
 
 ## CLI
 
 ```bash
-python3 dreamify.py --check                 # pre-flight only
-python3 dreamify.py --dry-run               # parse & preview, no API calls
-python3 dreamify.py                         # process the whole queue
-python3 dreamify.py 3                        # first 3 only (same as -n 3)
-python3 dreamify.py --aspect 16:9 --batch 2 # global overrides (below inline)
-python3 dreamify.py --no-sidecar            # skip .json sidecars
+python3 dreamify.py --list-models   # list models (online)
+python3 dreamify.py --check          # pre-flight only
+python3 dreamify.py --dry-run        # preview, no API calls
+python3 dreamify.py 3                 # first 3 only
+python3 dreamify.py --no-sidecar
 ```
 
-Precedence: **inline params > CLI flags > config.json**.
+## Use it inside an AI agent
 
-## Config `config/config.json`
+The repo ships `SKILL.md` (Claude Code) and `AGENTS.md` (Codex / generic agents).
 
-| Field | Description | Default |
-|---|---|---|
-| `model` | generation model | `gpt-image-2` |
-| `width` / `height` | pixels | `1024` / `1024` |
-| `aspectRatio` | aspect ratio | `1:1` |
-| `batch_size` | images per prompt | `1` |
-| `steps` | sampling steps (null = omit) | `null` |
-| `negative_prompt` | negative prompt | `""` |
-| `delay_between_seconds` | throttle between prompts | `5` |
-| `max_retries` | retries per failed prompt | `2` |
-| `request_timeout_seconds` | per-request timeout | `300` |
+- **Claude Code**: `./install.sh` → installs to `~/.claude/skills/`, then ask in natural language.
+- **Codex**: `cd` into the repo and run `codex`; it reads `AGENTS.md` automatically.
+- **Any agent**: feed it `SKILL.md`/`AGENTS.md`, let it (1) append prompts to `prompts.txt`, (2) run
+  `python3 dreamify.py`, (3) read `run.log`. Any agent that can write files and run shell can use it.
 
-## Auth
+## Notes
 
-- `Authorization: Bearer MD5(apiKey + serverTimeString)` — computed automatically from `/api/time`.
-- `apiKey` is the public front-end identifier (`NEXT_PUBLIC_API_KEY`), not a secret, so it ships with the repo.
-- `Cookie` — **your** login session, read from `config/cookie.txt`, gitignored. **Never commit it.**
-
-## Install as a Claude Code Skill
-
-```bash
-./install.sh            # to ~/.claude/skills/dreamifly-batch (user level)
-./install.sh .claude    # to ./.claude/skills (project level)
-```
+- 💸 Video is expensive (Wan ~200, happyhorse ~150+) and slow; no auto-retry for video.
+- `img=` image-to-image is verified: local file / URL / data URI, auto base64, ≤10MB, ≤9 images, login required.
+- 401 = re-copy your cookie; 402 = out of credits. Failed prompts stay in `prompts.txt` to retry.
 
 ## License
 

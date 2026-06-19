@@ -8,5 +8,12 @@
   "negative_prompt": "",
   "delay_between_seconds": 5,
   "max_retries": 2,
-  "request_timeout_seconds": 300
+  "request_timeout_seconds": 300,
+
+  "video_width": 1280,
+  "video_height": 720,
+  "video_aspectRatio": "16:9",
+  "video_seconds": 5,
+  "video_resolution": "720P",
+  "video_timeout_seconds": 900
 }
