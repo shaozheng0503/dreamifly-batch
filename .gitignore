@@ -13,3 +13,6 @@ __pycache__/
 .DS_Store
 .venv/
 venv/
+
+# 本地 Claude Code / 定时任务等临时产物
+.claude/
