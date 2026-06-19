@@ -10,9 +10,17 @@
 
 ## 示例
 
+**文生图**
+
 | 提示词 | 出图 |
 |---|---|
 | `a serene japanese garden at sunset, koi pond, soft golden light, ultra detailed` | ![sample](./docs/sample-japanese-garden.png) |
+
+**图生图**（`img=` 传参考图，提示词 `transform ... into a snowy winter scene, frozen koi pond`）
+
+| 参考图（输入） | 出图（输出） |
+|---|---|
+| ![ref](./docs/sample-japanese-garden.png) | ![i2i](./docs/sample-i2i-winter.png) |
 
 ## 功能
 
@@ -83,7 +91,7 @@ a neon cat on the moon | 16:9 | x2 | seed=123 | model=gpt-image-2 | 1024x768 | n
 | `seed=123` | 固定随机种子（便于复现） |
 | `model=...` | 覆盖模型 |
 | `neg=...` | 负向提示词 |
-| `img=URL,URL` | 参考图，图生图（实验性） |
+| `img=路径或URL` | 参考图做图生图，可逗号分隔多张（本地文件 / URL / data:URI，自动转 base64） |
 
 ## 命令行
 
@@ -137,7 +145,9 @@ python3 dreamify.py --prompts other.txt --images-dir out/   # 自定义路径
 - ⚠️ **不要把 `config/cookie.txt` 提交到任何公开仓库**——它等同于你的登录凭证。
 - 积分不足（402）或登录失效（401）时脚本会立即停止并说明原因，已成功的不受影响。
 - 失败的提示词会保留在 `prompts.txt`，直接重跑即可续跑。
-- `img=` 图生图为实验性：API 对参考图的具体格式未做充分验证，遇到异常请回退为纯文生图。
+- **图生图（`img=`）已实测可用**：参考图可为本地文件 / URL / `data:`URI，脚本会自动转成无前缀
+  base64 提交；单图 ≤ 10MB、一次 1–9 张、需有效登录态（否则 `LOGIN_REQUIRED_FOR_I2I`）。
+- `batch_size`（含内联 `xN`）服务端上限为 4。
 
 ## License
 

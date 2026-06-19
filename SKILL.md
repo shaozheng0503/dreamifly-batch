@@ -47,7 +47,7 @@ a neon cat on the moon | 16:9 | x2 | seed=123 | model=gpt-image-2 | 1024x768 | n
 | `seed=123` | 固定随机种子（便于复现） |
 | `model=...` | 覆盖模型 |
 | `neg=...` | 负向提示词 |
-| `img=URL,URL` | 参考图，图生图（实验性） |
+| `img=路径或URL` | 参考图做图生图（本地文件 / URL / data:URI，自动转 base64，可逗号分隔多张，1–9 张，单图 ≤10MB，需登录） |
 
 也可用命令行做全局覆盖（优先级低于内联）：
 `python3 dreamify.py --aspect 16:9 --batch 2 --model gpt-image-2`

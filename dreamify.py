@@ -30,6 +30,7 @@ Dreamifly 批量生图脚本
 """
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -39,6 +40,9 @@ import hashlib
 import datetime
 import urllib.request
 import urllib.error
+
+# 前端限制：单张参考图 ≤ 10MB（0xa00000）
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 BASE = "https://dreamifly.com"
 # NEXT_PUBLIC_API_KEY —— 这是打进前端、发给每个浏览器的公开标识，非私密凭证
@@ -69,7 +73,7 @@ CONFIG_SCHEMA = {
     "width": (int, lambda v: 64 <= v <= 4096),
     "height": (int, lambda v: 64 <= v <= 4096),
     "aspectRatio": (str, lambda v: bool(re.fullmatch(r"\d+:\d+", v))),
-    "batch_size": (int, lambda v: 1 <= v <= 16),
+    "batch_size": (int, lambda v: 1 <= v <= 4),
     "delay_between_seconds": ((int, float), lambda v: v >= 0),
     "max_retries": (int, lambda v: 0 <= v <= 10),
     "request_timeout_seconds": ((int, float), lambda v: v > 0),
@@ -293,6 +297,28 @@ def extract_image_urls(payload):
     return out
 
 
+def encode_reference_image(ref):
+    """把参考图统一转成 API 要求的「无前缀 base64 字符串」。
+    支持：本地文件路径 / http(s) URL / data:URI。
+    """
+    if ref.startswith("data:"):
+        return ref.split(",", 1)[1]
+    if ref.startswith(("http://", "https://", "//")):
+        url = ("https:" + ref) if ref.startswith("//") else ref
+        req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": BASE + "/"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = resp.read()
+    else:
+        path = os.path.abspath(os.path.expanduser(ref))
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"参考图不存在：{ref}")
+        with open(path, "rb") as f:
+            data = f.read()
+    if len(data) > MAX_IMAGE_BYTES:
+        log(f"  ⚠️ 参考图 {ref} 约 {len(data)//1024//1024}MB，超过 10MB 上限，可能被拒。")
+    return base64.b64encode(data).decode("ascii")
+
+
 def write_sidecar(image_path, meta):
     """在图片旁写 <name>.json 记录生成参数，便于复现。"""
     side = os.path.splitext(image_path)[0] + ".json"
@@ -455,10 +481,26 @@ def main(argv=None):
         body, seed = build_body(prompt, cfg, overrides, cli)
         log(f"[{n}/{len(pending)}] 生成中：{prompt[:60]} "
             f"({body['model']} {body['width']}x{body['height']} x{body['batch_size']} seed={seed})")
+
+        # 图生图：把参考图编码为无前缀 base64 后再发（body 里保留原始引用给边车记录）
+        send_body = body
+        if body["images"]:
+            try:
+                encoded = [encode_reference_image(x) for x in body["images"]]
+                send_body = dict(body)
+                send_body["images"] = encoded
+                log(f"  🖼️ 已编码 {len(encoded)} 张参考图（图生图）")
+            except Exception as e:
+                log(f"  ❌ 参考图处理失败：{e} —— 跳过本条。")
+                append_done(prompt, [], note=f"FAILED 参考图错误：{e}")
+                if n < len(pending):
+                    time.sleep(cfg.get("delay_between_seconds", 5))
+                continue
+
         ok_item = False
         for attempt in range(max_retries + 1):
             try:
-                req = post_generate(body, cookie)
+                req = post_generate(send_body, cookie)
                 with urllib.request.urlopen(req, timeout=cfg.get("request_timeout_seconds", 300)) as r:
                     payload = json.loads(r.read().decode())
                 urls = extract_image_urls(payload)
@@ -470,6 +512,9 @@ def main(argv=None):
                     fn, path, src = download(u, prompt, i)
                     files.append(fn)
                     if not args.no_sidecar:
+                        # API 可能内联返回 data:URI；别把整段 base64 写进边车
+                        src_disp = (f"data:inline({len(src)} chars)"
+                                    if src.startswith("data:") else src)
                         write_sidecar(path, {
                             "prompt": prompt,
                             "model": body["model"],
@@ -478,7 +523,7 @@ def main(argv=None):
                             "aspectRatio": body["aspectRatio"],
                             "seed": seed,
                             "batch_index": i,
-                            "source_url": src,
+                            "source_url": src_disp,
                             "reference_images": body["images"],
                             "negative_prompt": body.get("negative_prompt", ""),
                             "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),

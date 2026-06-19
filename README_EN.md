@@ -12,9 +12,17 @@ run one command.
 
 ## Example
 
+**Text-to-image**
+
 | Prompt | Output |
 |---|---|
 | `a serene japanese garden at sunset, koi pond, soft golden light, ultra detailed` | ![sample](./docs/sample-japanese-garden.png) |
+
+**Image-to-image** (`img=` reference, prompt `transform ... into a snowy winter scene, frozen koi pond`)
+
+| Reference (input) | Output |
+|---|---|
+| ![ref](./docs/sample-japanese-garden.png) | ![i2i](./docs/sample-i2i-winter.png) |
 
 ## Features
 
@@ -67,7 +75,7 @@ a neon cat on the moon | 16:9 | x2 | seed=123 | model=gpt-image-2 | 1024x768 | n
 | `seed=123` | fixed seed (reproducible) |
 | `model=...` | override model |
 | `neg=...` | negative prompt |
-| `img=URL,URL` | reference image(s), image-to-image (experimental) |
+| `img=path,or,URL` | reference image(s) for image-to-image — local file / URL / data:URI, auto base64 (1–9, ≤10MB each, login required) |
 
 ## CLI
 
