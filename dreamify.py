@@ -37,6 +37,7 @@ Dreamifly 批量生图 / 生视频脚本
 import argparse
 import base64
 import json
+import math
 import os
 import re
 import sys
@@ -60,14 +61,20 @@ VIDEO_EXTS = (".mp4", ".webm", ".mov", ".m4v", ".gif")
 # 已知模型注册表（离线兜底；--list-models 会拉取在线最新）。
 # 成本为大致值，最终以平台扣费为准。
 # steps：部分模型（Wai/Z）必须传指定步数，否则 400；其余传 None（不发）。
+# pixels：模型原生分辨率像素预算（用于按 aspectRatio 换算宽高，来自前端 normalResolutionPixels）。
 IMAGE_MODELS = {
-    "Wai-SDXL-V150":   {"t2i": True,  "i2i": False, "max_images": 0, "login": False, "steps": 20,   "cost": "~0.1",   "tags": "动漫风格"},
-    "Wai-SDXL-V170":   {"t2i": True,  "i2i": False, "max_images": 0, "login": False, "steps": 20,   "cost": "~0.1",   "tags": "动漫风格"},
-    "Z-Image-Turbo":   {"t2i": True,  "i2i": False, "max_images": 0, "login": False, "steps": 10,   "cost": "~0.325", "tags": "中文/快"},
-    "Qwen-Image-Edit": {"t2i": False, "i2i": True,  "max_images": 3, "login": False, "steps": None, "cost": "~1.2",   "tags": "图生图/中文"},
-    "gpt-image-2":     {"t2i": True,  "i2i": True,  "max_images": 3, "login": True,  "steps": None, "cost": "顶级",    "tags": "文/图生图·中文"},
-    "nano-banana-2":   {"t2i": True,  "i2i": True,  "max_images": 3, "login": True,  "steps": None, "cost": "~25+",   "tags": "文/图生图·中文"},
+    "Wai-SDXL-V150":   {"t2i": True,  "i2i": False, "max_images": 0, "login": False, "steps": 20,   "pixels": 1048576, "cost": "~0.1",   "tags": "动漫风格"},
+    "Wai-SDXL-V170":   {"t2i": True,  "i2i": False, "max_images": 0, "login": False, "steps": 20,   "pixels": 1048576, "cost": "~0.1",   "tags": "动漫风格"},
+    "Z-Image-Turbo":   {"t2i": True,  "i2i": False, "max_images": 0, "login": False, "steps": 10,   "pixels": 1048576, "cost": "~0.325", "tags": "中文/快"},
+    "Qwen-Image-Edit": {"t2i": False, "i2i": True,  "max_images": 3, "login": False, "steps": None, "pixels": 1048576, "cost": "~1.2",   "tags": "图生图/中文"},
+    "gpt-image-2":     {"t2i": True,  "i2i": True,  "max_images": 3, "login": True,  "steps": None, "pixels": 1327104, "cost": "顶级",    "tags": "文/图生图·中文"},
+    "nano-banana-2":   {"t2i": True,  "i2i": True,  "max_images": 3, "login": True,  "steps": None, "pixels": 1048576, "cost": "~25+",   "tags": "文/图生图·中文"},
 }
+DEFAULT_PIXELS = 1048576       # 未知生图模型的像素预算（≈1024x1024）
+VIDEO_PIXELS = 921600          # 视频像素预算（=1280x720，来自前端 totalPixels）
+
+# 平台支持的预设宽高比（前端下拉项）。脚本会据此把比例换算成匹配的 width/height 再发。
+ASPECT_RATIOS = ["16:9", "21:9", "4:3", "3:2", "5:4", "1:1", "4:5", "2:3", "3:4", "9:16", "9:21"]
 VIDEO_MODELS = {
     "Wan2.2-I2V-Lightning": {
         "provider": "comfy", "mode": "image-to-video", "needs_image": True,
@@ -244,6 +251,8 @@ def parse_prompt_line(line):
         low = seg.lower()
         if re.fullmatch(r"\d+:\d+", seg):
             overrides["aspectRatio"] = seg
+            if seg not in ASPECT_RATIOS:
+                log(f"  ⚠️ {seg} 不在平台预设比例 {ASPECT_RATIOS} 内，脚本仍会按它换算宽高，但平台可能不识别该比例标签。")
         elif re.fullmatch(r"x\d+", low):
             overrides["batch_size"] = int(low[1:])
         elif re.fullmatch(r"\d+x\d+", low):
@@ -307,6 +316,61 @@ def slugify(text, maxlen=40):
 
 # ---------- 请求体 ----------
 
+def _parse_ratio(ar):
+    m = re.fullmatch(r"\s*(\d+)\s*:\s*(\d+)\s*", ar or "")
+    if not m:
+        return None
+    rw, rh = int(m.group(1)), int(m.group(2))
+    return (rw, rh) if rw > 0 and rh > 0 else None
+
+
+def _reduce_ratio(w, h):
+    g = math.gcd(int(w), int(h)) or 1
+    return f"{int(w)//g}:{int(h)//g}"
+
+
+def dims_for_ratio(aspect, target_px, multiple=16, cap=2048):
+    """按宽高比 + 像素预算换算出宽高（取 16 的整数倍，尽量贴近目标比例与像素）。"""
+    rw, rh = _parse_ratio(aspect) or (1, 1)
+    scale = (target_px / (rw * rh)) ** 0.5
+    w = max(multiple, min(cap, int(round(rw * scale / multiple) * multiple)))
+    h = max(multiple, min(cap, int(round(rh * scale / multiple) * multiple)))
+    return w, h
+
+
+def resolve_dimensions(overrides, cli, cfg, *, target_px, cfg_w, cfg_h, cfg_ar, default_ar):
+    """统一解析宽高与宽高比。
+    - 显式像素尺寸（内联 WxH 或 --width+--height）→ 原样使用；
+    - 指定了 aspectRatio（内联 16:9 或 --aspect）→ 按比例 + 像素预算换算宽高（修复比例不生效）；
+    - 否则用 config 宽高（若与 config 宽高比一致），不一致则按 config 宽高比换算。
+    返回 (width, height, aspectRatio)。
+    """
+    inline_dims = ("width" in overrides) and ("height" in overrides)
+    cli_dims = (cli.get("width") is not None) and (cli.get("height") is not None)
+    aspect_set = ("aspectRatio" in overrides) or (cli.get("aspectRatio") is not None)
+    aspect = overrides.get("aspectRatio") or cli.get("aspectRatio") or cfg.get(cfg_ar, default_ar)
+
+    if inline_dims:
+        w, h = int(overrides["width"]), int(overrides["height"])
+        return w, h, (aspect if aspect_set else _reduce_ratio(w, h))
+    if cli_dims:
+        w, h = int(cli["width"]), int(cli["height"])
+        return w, h, (aspect if aspect_set else _reduce_ratio(w, h))
+    if aspect_set:
+        w, h = dims_for_ratio(aspect, target_px)
+        return w, h, aspect
+
+    cw = int(cfg.get(cfg_w, 1024) or 1024)
+    ch = int(cfg.get(cfg_h, 1024) or 1024)
+    pr = _parse_ratio(aspect)
+    if pr and abs((cw / ch) - (pr[0] / pr[1])) < 0.02:
+        return cw, ch, aspect          # config 宽高与宽高比一致，原样用（向后兼容默认 1024x1024）
+    if pr:
+        w, h = dims_for_ratio(aspect, target_px)
+        return w, h, aspect            # config 宽高与宽高比不一致，以宽高比为准换算
+    return cw, ch, aspect
+
+
 def build_body(prompt, cfg, overrides=None, cli=None):
     """生图请求体，返回 (body, seed)。优先级：内联 > 命令行 > config。"""
     overrides = overrides or {}
@@ -324,15 +388,19 @@ def build_body(prompt, cfg, overrides=None, cli=None):
         seed = int.from_bytes(os.urandom(4), "big") % 100000000
 
     model = canonical_model(pick("model", "gpt-image-2"))
+    target_px = IMAGE_MODELS.get(model, {}).get("pixels", DEFAULT_PIXELS)
+    width, height, aspectRatio = resolve_dimensions(
+        overrides, cli, cfg, target_px=target_px,
+        cfg_w="width", cfg_h="height", cfg_ar="aspectRatio", default_ar="1:1")
     body = {
         "prompt": prompt,
-        "width": pick("width", 1024),
-        "height": pick("height", 1024),
+        "width": width,
+        "height": height,
         "seed": seed,
         "batch_size": pick("batch_size", 1),
         "model": model,
         "images": overrides.get("images", []),
-        "aspectRatio": pick("aspectRatio", "1:1"),
+        "aspectRatio": aspectRatio,
     }
     # steps：内联/cli/config 优先，否则用模型注册表默认（Wai 必须 20/30，Z-Image-Turbo 10/20）
     steps = pick("steps", None)
@@ -363,19 +431,16 @@ def build_video_body(prompt, model, cfg, overrides=None, cli=None):
     else:
         mode = "text-to-video"
 
-    def pick(key, cfgkey, default):
-        if key in overrides:
-            return overrides[key]
-        if cli.get(key) is not None:
-            return cli[key]
-        return cfg.get(cfgkey, default)
+    width, height, aspectRatio = resolve_dimensions(
+        overrides, cli, cfg, target_px=VIDEO_PIXELS,
+        cfg_w="video_width", cfg_h="video_height", cfg_ar="video_aspectRatio", default_ar="16:9")
 
     body = {
         "prompt": prompt,
         "negative_prompt": (overrides.get("negative_prompt") or "").strip(),
-        "width": pick("width", "video_width", 1280),
-        "height": pick("height", "video_height", 720),
-        "aspectRatio": pick("aspectRatio", "video_aspectRatio", "16:9"),
+        "width": width,
+        "height": height,
+        "aspectRatio": aspectRatio,
         "model": model,
         "videoMode": mode,
     }
