@@ -55,6 +55,7 @@ city timelapse | model=happyhorse-1.0 | secs=5 | res=720P
 | 片段 | 含义 |
 |---|---|
 | `model=...` | 选择模型（生图或视频） |
+| `style=...` | 风格预设：cartoon/anime/oil/lineart/vector/pixel/lego/riso/realistic/puppet/emoji（或中文名），作为前缀加到提示词 |
 | `16:9` / `1024x768` | 宽高比（自动换算匹配宽高，比例才真生效）/ 显式宽x高（优先） |
 | `x2` | 生成 2 张（≤4，生图） |
 | `seed=123` / `steps=20` | 种子 / 步数（步数一般自动） |

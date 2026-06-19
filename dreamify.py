@@ -75,6 +75,54 @@ VIDEO_PIXELS = 921600          # 视频像素预算（=1280x720，来自前端 t
 
 # 平台支持的预设宽高比（前端下拉项）。脚本会据此把比例换算成匹配的 width/height 再发。
 ASPECT_RATIOS = ["16:9", "21:9", "4:3", "3:2", "5:4", "1:1", "4:5", "2:3", "3:4", "9:16", "9:21"]
+
+# 平台预设风格（前端「风格」下拉）。应用方式与前端一致：把风格描述前缀加到提示词上。
+STYLES = {
+    "cartoon":   "cartoon style",
+    "anime":     "anime style",
+    "oil":       "oil painting style",
+    "lineart":   "black and white line art sketch style",
+    "vector":    "minimal flat vector line illustration style",
+    "pixel":     "retro arcade pixel art style",
+    "lego":      "LEGO brick toy style",
+    "riso":      "risograph grainy print illustration style",
+    "realistic": "photorealistic, realistic photography",
+    "puppet":    "felt puppet stop-motion doll style",
+    "emoji":     "cute glossy 3D emoji icon style",
+}
+STYLE_ALIASES = {
+    "卡通": "cartoon",
+    "动漫": "anime",
+    "油画": "oil", "oilpainting": "oil", "oil-painting": "oil",
+    "线稿": "lineart", "line-art": "lineart", "line art": "lineart",
+    "矢量线条": "vector", "vectorline": "vector", "vector-line": "vector", "矢量": "vector",
+    "街机像素": "pixel", "像素": "pixel", "arcade": "pixel",
+    "乐高积木": "lego", "乐高": "lego",
+    "riso噪点插画": "riso", "risograph": "riso", "riso噪点": "riso", "噪点": "riso",
+    "现实风格": "realistic", "现实": "realistic", "photorealistic": "realistic", "写实": "realistic",
+    "布偶风格": "puppet", "布偶": "puppet",
+    "emoji图标风格": "emoji", "emoji图标": "emoji", "emoji": "emoji", "表情": "emoji",
+}
+
+
+def normalize_style(s):
+    if not s:
+        return None
+    k = str(s).strip().lower()
+    if k in STYLES:
+        return k
+    return STYLE_ALIASES.get(k)
+
+
+def apply_style(prompt, style):
+    """把风格描述前缀加到提示词上（与前端「<风格> style, <提示词>」一致）。"""
+    if not style:
+        return prompt
+    key = normalize_style(style)
+    if not key:
+        log(f"  ⚠️ 未知风格 {style!r}，忽略。可用：{', '.join(STYLES)}（或中文名 卡通/动漫/油画/线稿/矢量线条/街机像素/乐高积木/Riso噪点/现实/布偶/Emoji图标）")
+        return prompt
+    return f"{STYLES[key]}, {prompt}"
 VIDEO_MODELS = {
     "Wan2.2-I2V-Lightning": {
         "provider": "comfy", "mode": "image-to-video", "needs_image": True,
@@ -228,6 +276,10 @@ def list_models():
         print("\nAI 视频模型（/api/generate-video）：")
         for m in vms:
             print(f"  {m.get('id',''):24} {m.get('mode',''):16} tags={','.join(m.get('tags',[]))}")
+        print("\n风格预设（用 style= 选，会作为前缀加到提示词）：")
+        zh = {v: k for k, v in STYLE_ALIASES.items() if "一" <= k[0] <= "鿿"}
+        for k in STYLES:
+            print(f"  {k:12} {zh.get(k,''):8} -> {STYLES[k]}")
         return 0
     except Exception as e:
         print(f"在线获取失败（{e}），内置已知模型：")
@@ -265,6 +317,8 @@ def parse_prompt_line(line):
                 log(f"  ⚠️ 无法解析 seed：{seg}")
         elif low.startswith("model="):
             overrides["model"] = seg.split("=", 1)[1].strip()
+        elif low.startswith("style="):
+            overrides["style"] = seg.split("=", 1)[1].strip()
         elif low.startswith(("neg=", "negative=")):
             overrides["negative_prompt"] = seg.split("=", 1)[1].strip()
         elif low.startswith("steps="):
@@ -387,6 +441,7 @@ def build_body(prompt, cfg, overrides=None, cli=None):
     if seed is None:
         seed = int.from_bytes(os.urandom(4), "big") % 100000000
 
+    prompt = apply_style(prompt, pick("style", None))
     model = canonical_model(pick("model", "gpt-image-2"))
     target_px = IMAGE_MODELS.get(model, {}).get("pixels", DEFAULT_PIXELS)
     width, height, aspectRatio = resolve_dimensions(
@@ -420,6 +475,7 @@ def build_video_body(prompt, model, cfg, overrides=None, cli=None):
     cli = cli or {}
     meta = VIDEO_MODELS.get(model, {})
     imgs = overrides.get("images", [])
+    prompt = apply_style(prompt, overrides.get("style") or cli.get("style") or cfg.get("style"))
 
     # 推导 videoMode（comfy 类如 Wan 固定为其自身 mode）
     if meta.get("provider") == "comfy":
@@ -735,6 +791,7 @@ def parse_args(argv):
     p.add_argument("--list-models", action="store_true", help="列出平台所有可用模型（在线）")
     p.add_argument("--no-sidecar", action="store_true", help="不写 .json 边车")
     p.add_argument("--model")
+    p.add_argument("--style", help="风格预设：cartoon/anime/oil/lineart/vector/pixel/lego/riso/realistic/puppet/emoji（或中文名）")
     p.add_argument("--aspect", dest="aspectRatio")
     p.add_argument("--width", type=int)
     p.add_argument("--height", type=int)
@@ -768,7 +825,7 @@ def main(argv=None):
         log(f"❌ 配置文件不是合法 JSON：{e}"); return 2
 
     cookie = load_cookie()
-    cli = {k: getattr(args, k) for k in ("model", "aspectRatio", "width", "height", "batch_size")}
+    cli = {k: getattr(args, k) for k in ("model", "style", "aspectRatio", "width", "height", "batch_size")}
 
     ok = preflight(cfg, cli, cookie, need_network=not args.dry_run)
     if args.check:

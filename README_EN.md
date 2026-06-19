@@ -73,6 +73,19 @@ Run `python3 dreamify.py --list-models` for the live list.
 
 Video mode is auto-derived: no image → text-to-video, 1 → image-to-video, many → reference-to-video.
 
+## Styles
+
+All 11 platform styles are built in via `style=` (prepended to the prompt). Same prompt `a cat sitting by a window`, different `style=` (Z-Image-Turbo):
+
+| anime | oil | pixel |
+|:---:|:---:|:---:|
+| ![anime](./docs/style-anime.png) | ![oil](./docs/style-oil.png) | ![pixel](./docs/style-pixel.png) |
+| **lego** | **lineart** | **riso** |
+| ![lego](./docs/style-lego.png) | ![lineart](./docs/style-lineart.png) | ![riso](./docs/style-riso.png) |
+
+Values: `cartoon anime oil lineart vector pixel lego riso realistic puppet emoji` (Chinese names also accepted).
+Usage: `a cat by a window | style=oil | model=Z-Image-Turbo` or global `--style oil`.
+
 ## Get your login Cookie (required for gpt-image-2 / nano-banana-2 / video)
 
 The `Authorization` token is computed automatically — the only thing **you** provide is your browser Cookie.

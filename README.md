@@ -23,7 +23,7 @@
 
 ## ✨ 特性
 
-- 🎨 **8 个模型**：6 个生图（含动漫/中文/图生图/顶级）+ 2 个视频（文生视频/图生视频），一处切换
+- 🎨 **8 个模型 + 11 种风格**：6 生图 + 2 视频，叠加卡通/动漫/油画/像素/乐高… 风格，一处切换
 - 📝 **队列式**：`prompts.txt` 每行一个提示词，逐条出图，`#` 注释、空行自动跳过
 - 🎚️ **逐行内联参数**：`| model= | 16:9 | x2 | seed= | img= | secs= | res=`，每行独立覆盖
 - 🛫 **开跑前预检**：`--check` 校验配置/模型/cookie/连通性，不让你白跑半批
@@ -39,6 +39,7 @@
 - [工作原理](#工作原理)
 - [示例](#示例)
 - [支持的模型](#支持的模型)
+- [风格预设](#风格预设)
 - [准备：获取登录态 Cookie（最重要）](#准备获取登录态-cookie最重要)
 - [快速开始](#快速开始)
 - [输出与产物](#输出与产物)
@@ -129,6 +130,33 @@ flowchart LR
 | `happyhorse-1.0` | 文/图/多参考图生视频 + 视频编辑 | `secs`(3–15) `res`(720P/1080P) | ~150 起 |
 
 视频模式按输入自动推导：无图→文生视频，1 张图→图生视频，多张图→多参考图生视频。
+
+---
+
+## 风格预设
+
+平台「风格」下拉的 **11 种风格**都已接入，用 `style=` 选择（中英文名均可），脚本会把风格描述自动加到提示词前。
+
+同一句提示词 `a cat sitting by a window` + 不同 `style=`（Z-Image-Turbo 真实生成）：
+
+| 动漫 `anime` | 油画 `oil` | 街机像素 `pixel` |
+|:---:|:---:|:---:|
+| ![anime](./docs/style-anime.png) | ![oil](./docs/style-oil.png) | ![pixel](./docs/style-pixel.png) |
+| **乐高 `lego`** | **线稿 `lineart`** | **Riso噪点 `riso`** |
+| ![lego](./docs/style-lego.png) | ![lineart](./docs/style-lineart.png) | ![riso](./docs/style-riso.png) |
+
+全部 11 种（`style=` 值，中英文都认；`--list-models` 也能查）：
+
+| 值 | 风格 | 值 | 风格 |
+|---|---|---|---|
+| `cartoon` | 卡通 | `lego` | 乐高积木 |
+| `anime` | 动漫 | `riso` | Riso噪点插画 |
+| `oil` | 油画 | `realistic` | 现实风格 |
+| `lineart` | 线稿 | `puppet` | 布偶风格 |
+| `vector` | 矢量线条 | `emoji` | Emoji图标风格 |
+| `pixel` | 街机像素 | | |
+
+用法：`a cat by a window | style=oil | model=Z-Image-Turbo`（或全局 `--style oil`）。
 
 ---
 
@@ -261,6 +289,7 @@ python3 dreamify.py --model Wai-SDXL-V170 --aspect 16:9
 | 片段 | 含义 | 适用 |
 |---|---|---|
 | `model=...` | 选择模型（生图或视频） | 全部 |
+| `style=...` | 风格预设（cartoon/anime/oil/pixel/lego… 或中文名，见[风格预设](#风格预设)） | 全部 |
 | `16:9` | 宽高比，脚本会**自动换算出匹配的宽高**再发（这样比例才真正生效） | 全部 |
 | `1024x768` | 显式宽 x 高，**优先级高于比例**，原样使用 | 全部 |
 
