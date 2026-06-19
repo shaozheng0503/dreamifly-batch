@@ -1,5 +1,12 @@
 # dreamifly-batch
 
+![Python](https://img.shields.io/badge/Python-3.x-blue?logo=python&logoColor=white)
+![dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
+![models](https://img.shields.io/badge/models-6%20image%20%2B%202%20video-orange)
+![Claude Code](https://img.shields.io/badge/Claude%20Code-Skill-8A2BE2)
+![Codex](https://img.shields.io/badge/Codex-AGENTS.md-000000)
+![License](https://img.shields.io/badge/License-MIT-yellow)
+
 从一个提示词列表，批量调用 [Dreamifly](https://dreamifly.com) 的 **生图 / 生视频** API 逐条生成并下载。
 排队、节流、自动重试、断点续跑、开跑前预检、多模型路由——把提示词写进 `prompts.txt`，跑一条命令就行。
 
@@ -14,14 +21,27 @@
 > 详见 [在 AI 里使用](#在-ai-里使用)。
 > 🐍 **零依赖**：只需 Python 3，全部标准库，无需 `pip install`。
 
+## ✨ 特性
+
+- 🎨 **8 个模型**：6 个生图（含动漫/中文/图生图/顶级）+ 2 个视频（文生视频/图生视频），一处切换
+- 📝 **队列式**：`prompts.txt` 每行一个提示词，逐条出图，`#` 注释、空行自动跳过
+- 🎚️ **逐行内联参数**：`| model= | 16:9 | x2 | seed= | img= | secs= | res=`，每行独立覆盖
+- 🛫 **开跑前预检**：`--check` 校验配置/模型/cookie/连通性，不让你白跑半批
+- 🧪 **零成本预演**：`--dry-run` 看清每条会怎么生成，不调 API、不花积分
+- ⬇️ **自动下载 + 边车**：图片/视频落地，旁边写 `.json` 记录模型/seed/参数，可复现
+- ✅ **断点续跑**：成功移入 `done.txt`，失败留在 `prompts.txt` 下次自动重试
+- 🤖 **AI 原生**：自带 `SKILL.md` / `AGENTS.md`，Claude Code、Codex、自定义 Agent 都能直接调用
+
 ---
 
 ## 目录
 
+- [工作原理](#工作原理)
 - [示例](#示例)
 - [支持的模型](#支持的模型)
 - [准备：获取登录态 Cookie（最重要）](#准备获取登录态-cookie最重要)
 - [快速开始](#快速开始)
+- [输出与产物](#输出与产物)
 - [切换模型教程](#切换模型教程)
 - [提示词内联参数](#提示词内联参数)
 - [命令行](#命令行)
@@ -31,7 +51,23 @@
   - [在 Codex 里使用](#在-codex-里使用)
   - [让你自己的 Agent 学会调用](#让你自己的-agent-学会调用)
 - [鉴权原理](#鉴权原理)
+- [常见问题与排错](#常见问题与排错)
 - [注意事项](#注意事项)
+
+---
+
+## 工作原理
+
+```mermaid
+flowchart LR
+    A["prompts.txt<br/>每行一个提示词"] --> B{"预检 --check<br/>配置 / cookie / 连通性"}
+    B -->|通过| C["逐条解析<br/>model= 路由 + 内联参数"]
+    C -->|生图模型| D["POST /api/generate"]
+    C -->|视频模型| E["POST /api/generate-video"]
+    D --> F["下载到 images/<br/>+ .json 边车"]
+    E --> F
+    F --> G["成功 → done.txt<br/>失败 → 留 prompts.txt 重试"]
+```
 
 ---
 
@@ -158,6 +194,37 @@ echo "anime girl with flowers | model=Wai-SDXL-V150" >> prompts.txt
 ```
 
 结果在 `images/`，成功记录在 `done.txt`，失败的留在 `prompts.txt` 下次自动重试。
+
+---
+
+## 输出与产物
+
+每次成功生成会落地两个文件：媒体本体 + 同名 `.json` 边车（记录参数，便于复现/检索）。
+
+```
+images/
+├── 20260619_122149_masterpiece_1girl_..._0.png    # 图片
+├── 20260619_122149_masterpiece_1girl_..._0.json   # 边车
+├── 20260619_125051_gentle_wind_koi_..._0.mp4      # 视频
+└── 20260619_125051_gentle_wind_koi_..._0.json
+done.txt   # 成功记录：时间 \t 提示词 \t 文件名
+run.log    # 运行日志（含每条的模型/seed/错误）
+```
+
+边车 `.json` 示例（图生视频）：
+```json
+{
+  "type": "video",
+  "prompt": "gentle wind, koi swimming slowly, falling leaves, cinematic",
+  "model": "Wan2.2-I2V-Lightning",
+  "videoMode": "image-to-video",
+  "width": 1280, "height": 720, "aspectRatio": "16:9",
+  "source_image": "docs/sample-japanese-garden.png",
+  "generated_at": "2026-06-19T12:50:51"
+}
+```
+
+> `images/`、`done.txt`、`run.log` 都已被 `.gitignore` 排除，不会误传你的产物。
 
 ---
 
@@ -308,6 +375,23 @@ Python 里直接调用也可以：`subprocess.run(["python3", "dreamify.py", "--
 - `Authorization: Bearer MD5(apiKey + 服务器时间串)`：脚本自动从 `/api/time` 取时间串并自行计算，**无需手动获取**。
 - `apiKey` 是打进前端、发给每个浏览器的**公开标识**（`NEXT_PUBLIC_API_KEY`），并非私密凭证，随仓库附带。
 - `Cookie`：**你个人的登录态**，读自 `config/cookie.txt`（已被 `.gitignore` 排除，请勿提交）。
+
+---
+
+## 常见问题与排错
+
+| 现象 | 原因 | 解决 |
+|---|---|---|
+| `HTTP 401` / `LOGIN_REQUIRED` | cookie 缺失或已过期 | 按[获取 Cookie](#准备获取登录态-cookie最重要)重新取一次写入 `config/cookie.txt` |
+| `HTTP 402` / `INSUFFICIENT_POINTS` | 积分不足 | 充值，或改用免登录模型（`Wai-SDXL-V150` / `Z-Image-Turbo`） |
+| `HTTP 400 Invalid steps` | 该模型对步数有硬性要求 | 脚本已按模型自动填；自定义用 `steps=20`/`steps=30`（Wai）、`10`/`20`（Z-Image-Turbo） |
+| 视频很慢 / `Connection reset` | 视频排队耗时长（可能 10 分钟以上） | 已默认 `video_timeout_seconds=1800`；失败项会保留，直接重跑即可 |
+| 图生图 / 图生视频"没吃参考图" | 模型不支持 i2i 或忘了 `img=` | i2i 用 `Qwen-Image-Edit`/`gpt-image-2`/`nano-banana-2`；i2v 用 `Wan2.2-I2V-Lightning` 且必须 `img=` |
+| 模型名报错 / 路由不对 | 名字拼错 | `--list-models` 查准确 id（大小写不敏感），再 `--dry-run` 预演确认 |
+| 中文提示词效果差 | 模型不支持中文 | 用 `Z-Image-Turbo` / `Qwen-Image-Edit` / `gpt-image-2` / `nano-banana-2` |
+| 参考图被拒 | 单图超过 10MB | 压缩到 10MB 以内；最多 9 张 |
+
+> 拿不准时的万能三连：`--list-models` → 写好 `prompts.txt` → `--dry-run` 预演 → `--check` 预检 → 正式跑。
 
 ---
 

@@ -1,5 +1,11 @@
 # dreamifly-batch
 
+![Python](https://img.shields.io/badge/Python-3.x-blue?logo=python&logoColor=white)
+![dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
+![models](https://img.shields.io/badge/models-6%20image%20%2B%202%20video-orange)
+![Claude Code](https://img.shields.io/badge/Claude%20Code-Skill-8A2BE2)
+![License](https://img.shields.io/badge/License-MIT-yellow)
+
 Batch-generate and download **images and videos** from a list of prompts via the
 [Dreamifly](https://dreamifly.com) API. Queueing, throttling, auto-retry, resume,
 pre-flight check, and multi-model routing — write prompts into `prompts.txt`, run one command.
