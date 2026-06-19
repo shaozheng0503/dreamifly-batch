@@ -240,7 +240,7 @@ python3 dreamify.py --prompts other.txt --images-dir out/   # 自定义路径
 | `video_aspectRatio` | 视频宽高比 | `16:9` |
 | `video_seconds` | 视频默认时长（happyhorse） | `5` |
 | `video_resolution` | 视频默认分辨率 | `720P` |
-| `video_timeout_seconds` | 视频请求超时（生成较慢） | `900` |
+| `video_timeout_seconds` | 视频请求超时（排队可能久，建议留足） | `1800` |
 
 ---
 
