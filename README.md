@@ -284,6 +284,20 @@ tests/                            # 解析、校验、估算的零 API 单元测
       位置：生成场景图、角色图、背景图，再进入时间轴动画和 MP4 导出。
     </td>
   </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="./docs/skill-cases/ppt-generic/ppt-hero-ribbon.png" alt="网页 PPT 配图链路" />
+      <br />
+      <strong>网页 PPT 配图</strong>
+      <br />
+      上游：<a href="https://github.com/op7418/guizang-ppt-skill">guizang-ppt-skill</a>
+      <br />
+      位置：按 S22(21:9) / S15(多图格) 槽位比例生成封面主视觉、章节图、概念隐喻图，再填进单文件 HTML deck。
+    </td>
+    <td width="50%" valign="top">
+      &nbsp;
+    </td>
+  </tr>
 </table>
 
 参考/对照项目：[`baoyu-image-gen`](https://github.com/JimLiu/baoyu-skills/tree/main/skills/baoyu-image-gen) 是通用 AI 生图后端 Skill，支持多 provider / Codex CLI，可作为 `dreamifly-batch` 的架构对照。

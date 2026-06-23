@@ -318,6 +318,77 @@ baoyu-design 读取 images/ 和 results.jsonl
 - 如果是 PPT 最终稿，建议优先 `gpt-image-2`，减少后期修图。
 - 如果只是寻找配图方向，可以先用低成本模型批量探索。
 
+## 与 guizang-ppt-skill 的联动（网页 PPT 配图后端）
+
+[`guizang-ppt-skill`](https://github.com/op7418/guizang-ppt-skill) 生成的是**单文件 HTML 横向翻页 PPT**（电子杂志风 / 瑞士国际主义风两套）。它的版式系统里有明确的**图片槽位**——`S22 Image Hero`（21:9 顶部主视觉）、`S15/S16` 多图格——并自带 `image-prompts.md` 描述配图类型、比例和提示词规则。
+
+也就是说，它天然需要一个"按槽位比例稳定出图"的后端。这正是 `dreamifly-batch` 的位置：
+
+```text
+内容 / 大纲
+  ↓
+guizang-ppt-skill
+  - 选风格(杂志风 / 瑞士风)、主题色、版式
+  - 决定哪一页需要图、放进哪个槽位、要什么比例(S22 → 21:9 / S15 → 统一 21:9 或 16:10)
+  - 写出每张图的主题 prompt
+  ↓
+缺图时
+  ↓
+dreamifly-batch
+  - 写入 jobs.jsonl(带 aspectRatio 对齐槽位)
+  - validate / estimate / dry-run / check
+  - 批量生成并下载到 images/
+  - results.jsonl 交回文件路径
+  ↓
+guizang-ppt-skill
+  - 按 {页号}-{语义}.png 命名放进 images/
+  - 填进 S22 / S15 槽位,渲染最终 deck
+```
+
+分工要点：
+
+- **比例必须先定再生成**：S22 主视觉用 `21:9`，S15/S16 同组多图统一 `21:9` 或 `16:10`。在 `jobs.jsonl` 里用 `aspectRatio` 对齐，`dreamifly-batch` 会按模型像素预算换算匹配宽高。
+- **草稿用便宜模型探索，终稿再升级**：先用 `Z-Image-Turbo` 低成本试构图方向；选定后对正式主视觉用 `gpt-image-2`，运行前按高成本规则确认。
+- **PPT skill 不必自己维护模型调用**：它只管"该画什么、放哪、什么比例"，`dreamifly-batch` 管"安全生成、下载、记录、重试"。
+
+`jobs.jsonl` 示例（按 PPT 槽位对齐比例）：
+
+```jsonl
+{"prompt":"ultra-wide minimalist abstract hero, flowing klein-blue light ribbons over clean off-white, geometric Swiss feel, lots of negative space, no text, no logo","model":"Z-Image-Turbo","aspectRatio":"21:9","negative_prompt":"text, watermark, logo, people"}
+{"prompt":"clean isometric illustration of a minimalist desk with a laptop, muted palette with one blue accent, no text, no brand","model":"Z-Image-Turbo","aspectRatio":"21:9","negative_prompt":"text, watermark, logo, brand"}
+{"prompt":"a single blue paper origami boat on a vast off-white surface, soft shadow, calm metaphor, no text","model":"Z-Image-Turbo","aspectRatio":"16:9","negative_prompt":"text, watermark, logo, people"}
+```
+
+实测样例（`Z-Image-Turbo` 真实生成，均为**无文字、无品牌、无敏感信息的通用占位配图**，仅用于演示"PPT skill 槽位 ← dreamifly-batch 出图"的交接，不代表任何具体 deck 内容）：
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="./skill-cases/ppt-generic/ppt-hero-ribbon.png" alt="PPT 封面主视觉占位图(21:9)" />
+      <br /><strong>S22 封面主视觉 · 21:9</strong><br />抽象主视觉，铺满顶部 hero 槽位。
+    </td>
+    <td width="50%" valign="top">
+      <img src="./skill-cases/ppt-generic/ppt-section-desk.png" alt="PPT 章节配图占位图(21:9)" />
+      <br /><strong>章节 / 案例配图 · 21:9</strong><br />中性场景图，进 S15/S16 图片格。
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="./skill-cases/ppt-generic/ppt-concept-boat.png" alt="PPT 概念隐喻占位图(16:9)" />
+      <br /><strong>概念隐喻 · 16:9</strong><br />单一隐喻图，给观点页做视觉锚点。
+    </td>
+    <td width="50%" valign="top">
+      &nbsp;
+    </td>
+  </tr>
+</table>
+
+脱敏注意：
+
+- 真实 deck（含人名、内部规划、业务数据、产品截图等）**不要**生成进配图、也不要把这类图提交到公开仓库。
+- 仓库里只放**无关紧要的通用占位图**作演示；正式配图在本地生成、随 deck 一起管理，按 `dreamifly-batch` 的隐私规则处理 `results.jsonl` 与 `images/`。
+- 需要图里带具体文字/数据时，优先在 PPT skill 的 HTML 文本层写，而不是让模型把文字画进图片（容易错字，也更难脱敏）。
+
 ## 推荐的跨 Skill 工作流
 
 ### 图像素材 → 动画视频
